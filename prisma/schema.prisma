@@ -1,0 +1,293 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id            String      @id @default(uuid())
+  name          String
+  email         String      @unique
+  passwordHash  String
+  role          String      @default("viewer") // admin, manager, ads_specialist, content, viewer
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  connections   MetaConnection[]
+  auditLogs     AuditLog[]
+}
+
+model MetaConnection {
+  id                   String        @id @default(uuid())
+  userId               String
+  user                 User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connectionName       String
+  graphApiVersion      String        @default("v25.0")
+  encryptedAccessToken String
+  encryptedAppSecret   String?
+  appId                String?
+  status               String        @default("disconnected") // connected, disconnected, error
+  lastTestedAt         DateTime?
+  lastSyncAt           DateTime?
+  syncStartDate        DateTime
+  syncFrequency        String        @default("Manual") // Manual, Every 1 hour, Every 6 hours, Daily
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  adAccounts           AdAccount[]
+  syncJobs             SyncJob[]
+}
+
+model AdAccount {
+  id                 String          @id @default(uuid())
+  metaConnectionId   String
+  metaConnection     MetaConnection  @relation(fields: [metaConnectionId], references: [id], onDelete: Cascade)
+  accountId          String          @unique // e.g. act_123456789
+  accountName        String
+  currency           String
+  timezoneName       String
+  businessId         String?
+  status             String?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  campaigns          Campaign[]
+  adsets             AdSet[]
+  ads                Ad[]
+  creatives          Creative[]
+  insightsDaily      InsightsDaily[]
+}
+
+model Campaign {
+  id              String         @id @default(uuid())
+  adAccountId     String
+  adAccount       AdAccount      @relation(fields: [adAccountId], references: [id], onDelete: Cascade)
+  campaignId      String         @unique
+  campaignName    String
+  objective       String?
+  buyingType      String?
+  status          String
+  effectiveStatus String
+  dailyBudget     Float?
+  lifetimeBudget  Float?
+  startTime       DateTime?
+  endTime         DateTime?
+  createdTime     DateTime?
+  updatedTime     DateTime?
+  rawJson         String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  adsets          AdSet[]
+  ads             Ad[]
+}
+
+model AdSet {
+  id               String         @id @default(uuid())
+  adAccountId      String
+  adAccount        AdAccount      @relation(fields: [adAccountId], references: [id], onDelete: Cascade)
+  campaignId       String
+  campaign         Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  adsetId          String         @unique
+  adsetName        String
+  optimizationGoal String?
+  billingEvent     String?
+  bidStrategy      String?
+  dailyBudget      Float?
+  lifetimeBudget   Float?
+  targetingJson    String?
+  status           String
+  effectiveStatus  String
+  startTime        DateTime?
+  endTime          DateTime?
+  rawJson          String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  ads              Ad[]
+}
+
+model Ad {
+  id              String         @id @default(uuid())
+  adAccountId     String
+  adAccount       AdAccount      @relation(fields: [adAccountId], references: [id], onDelete: Cascade)
+  campaignId      String
+  campaign         Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  adsetId         String
+  adset           AdSet          @relation(fields: [adsetId], references: [id], onDelete: Cascade)
+  adId            String         @unique
+  adName          String
+  creativeId      String?
+  status          String
+  effectiveStatus String
+  createdTime     DateTime?
+  updatedTime     DateTime?
+  rawJson         String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  contentMapping  ContentMapping?
+}
+
+model Creative {
+  id                String      @id @default(uuid())
+  adAccountId       String
+  adAccount         AdAccount   @relation(fields: [adAccountId], references: [id], onDelete: Cascade)
+  creativeId        String      @unique
+  name              String?
+  title             String?
+  body              String?
+  imageUrl          String?
+  thumbnailUrl      String?
+  videoId           String?
+  objectStoryId     String?
+  callToActionType  String?
+  linkUrl           String?
+  rawJson           String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+}
+
+model InsightsDaily {
+  id                         String    @id @default(uuid())
+  date                       DateTime
+  adAccountId                String
+  adAccount                  AdAccount @relation(fields: [adAccountId], references: [id], onDelete: Cascade)
+  campaignId                 String
+  campaignName               String
+  adsetId                    String
+  adsetName                  String
+  adId                       String
+  adName                     String
+  level                      String    // campaign, adset, ad
+  spend                      Float     @default(0)
+  impressions                Int       @default(0)
+  reach                      Int       @default(0)
+  frequency                  Float     @default(1)
+  clicks                     Int       @default(0)
+  linkClicks                 Int       @default(0)
+  uniqueClicks               Int       @default(0)
+  inlineLinkClicks           Int       @default(0)
+  ctr                        Float     @default(0)
+  uniqueCtr                  Float     @default(0)
+  cpc                        Float     @default(0)
+  cpm                        Float     @default(0)
+  cpp                        Float     @default(0)
+  leads                      Int       @default(0)
+  costPerLead                Float     @default(0)
+  landingPageViews           Int       @default(0)
+  costPerLandingPageView     Float     @default(0)
+  video3sViews               Int       @default(0)
+  videoThruplay              Int       @default(0)
+  videoP25WatchedActions     Int       @default(0)
+  videoP50WatchedActions     Int       @default(0)
+  videoP75WatchedActions     Int       @default(0)
+  videoP95WatchedActions     Int       @default(0)
+  videoP100WatchedActions    Int       @default(0)
+  actionsJson                String?   // JSON string
+  costPerActionTypeJson      String?   // JSON string
+  breakdownJson              String?   // JSON string
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
+
+  @@unique([date, level, adId])
+}
+
+model ContentMapping {
+  id              String         @id @default(uuid())
+  adId            String         @unique
+  ad              Ad             @relation(fields: [adId], references: [id], onDelete: Cascade)
+  contentId       String?
+  campus          String?
+  grade           String?
+  funnelStage     String?        // TOFU, MOFU, BOFU
+  campaignTheme   String?
+  angle           String?
+  insight         String?
+  hookType        String?
+  format          String?        // video, image, carousel, text-only
+  offer           String?
+  creator         String?
+  contentStatus   String         @default("testing") // testing, win, fail, scale, archived
+  note            String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+}
+
+model KpiTarget {
+  id                     String    @id @default(uuid())
+  month                  Int
+  year                   Int
+  campus                 String
+  grade                  String
+  source                 String    // LeadAds, Messenger, Conversion, etc.
+  targetLeads            Int       @default(0)
+  targetQualifiedLeads   Int       @default(0)
+  targetWl               Int       @default(0)
+  targetEnrollments      Int       @default(0)
+  monthlyBudget          Float     @default(0)
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  @@unique([month, year, campus, grade, source])
+}
+
+model CrmLead {
+  id             String    @id @default(uuid())
+  leadDate       DateTime
+  phoneHash      String
+  emailHash      String
+  source         String
+  campaignId     String?
+  adsetId        String?
+  adId           String?
+  contentId      String?
+  campus         String
+  grade          String
+  leadStatus     String    @default("lead") // lead, qualified_lead, wl, enrolled, rejected
+  rejectReason   String?
+  salesOwner     String?
+  rawJson        String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model Recommendation {
+  id                 String               @id @default(uuid())
+  date               DateTime             @default(now())
+  objectType         String               // campaign, adset, ad, content
+  objectId           String               // The Meta ID or custom ID
+  recommendationType String               // SCALE, HOLD, TEST, REVIEW, CUT, REFRESH_CREATIVE, CHECK_LEAD_QUALITY, CHECK_SALES, CHECK_FORM, CHECK_LANDING_PAGE, CHECK_TARGETING
+  severity           String               // low, medium, high
+  title              String
+  reason             String
+  evidenceJson       String
+  status             String               @default("pending") // pending, approved, done, ignored
+  assignedTo         String?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+}
+
+model SyncJob {
+  id                 String          @id @default(uuid())
+  metaConnectionId   String
+  metaConnection     MetaConnection  @relation(fields: [metaConnectionId], references: [id], onDelete: Cascade)
+  adAccountId        String?
+  jobType            String          // structure_sync, insights_sync, creative_sync
+  status             String          @default("pending") // pending, running, success, failed
+  dateFrom           DateTime?
+  dateTo             DateTime?
+  errorMessage       String?
+  startedAt          DateTime?
+  finishedAt         DateTime?
+  createdAt          DateTime        @default(now())
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action      String
+  entityType  String
+  entityId    String
+  beforeJson  String?
+  afterJson   String?
+  createdAt   DateTime @default(now())
+}
