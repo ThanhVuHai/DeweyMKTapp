@@ -51,11 +51,16 @@ export function decrypt(text: string): string {
 
 /**
  * Mask access token for security display (e.g. EAAB************xyz)
+ * Never exposes the full token string to the client.
  */
 export function maskToken(token: string): string {
   if (!token) return '';
-  if (token.length <= 8) return '********';
-  const prefix = token.substring(0, 4);
-  const suffix = token.substring(token.length - 3);
+  let plain = token;
+  if (token.includes(':')) {
+    plain = decrypt(token);
+  }
+  if (!plain || plain.length <= 8) return '********';
+  const prefix = plain.substring(0, 4);
+  const suffix = plain.substring(plain.length - 3);
   return `${prefix}************${suffix}`;
 }
