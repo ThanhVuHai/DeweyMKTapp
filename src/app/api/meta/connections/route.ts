@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { encrypt, maskToken } from '@/lib/crypto';
+import { normalizeAdAccountId, MetaApiService } from '@/lib/meta';
 import { cookies } from 'next/headers';
 
 // GET: List all connections
@@ -10,7 +11,7 @@ export async function GET() {
       orderBy: { createdAt: 'desc' },
       include: {
         adAccounts: true,
-      }
+      },
     });
 
     // Mask access token for frontend display
@@ -21,9 +22,9 @@ export async function GET() {
     }));
 
     return NextResponse.json({ connections: sanitizedConnections });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('List connections failed:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   }
 }
 
@@ -35,6 +36,7 @@ export async function POST(request: Request) {
       connectionName,
       graphApiVersion = 'v25.0',
       accessToken,
+      adAccountId,
       appId,
       appSecret,
       syncStartDate,
@@ -43,7 +45,7 @@ export async function POST(request: Request) {
 
     if (!connectionName || !accessToken || !syncStartDate) {
       return NextResponse.json(
-        { error: 'Connection Name, Access Token and Sync Start Date are required' },
+        { error: 'Tên kết nối, Access Token và Ngày bắt đầu đồng bộ là bắt buộc' },
         { status: 400 }
       );
     }
@@ -59,7 +61,6 @@ export async function POST(request: Request) {
     } catch (_) {}
 
     if (!userId) {
-      // If running local/dev and session doesn't exist, assign to first user or create admin fallback
       const fallbackUser = await prisma.user.findFirst();
       userId = fallbackUser ? fallbackUser.id : 'default-user-id';
     }
@@ -82,6 +83,31 @@ export async function POST(request: Request) {
       },
     });
 
+    // If user specified an Ad Account ID during creation, verify and link it
+    if (adAccountId && typeof adAccountId === 'string' && adAccountId.trim()) {
+      const normalized = normalizeAdAccountId(adAccountId);
+      try {
+        const accountInfo = await MetaApiService.getAdAccount(normalized, {
+          encryptedAccessToken,
+          graphApiVersion,
+        });
+
+        await prisma.adAccount.create({
+          data: {
+            metaConnectionId: connection.id,
+            accountId: accountInfo.accountId,
+            accountName: accountInfo.accountName,
+            currency: accountInfo.currency,
+            timezoneName: accountInfo.timezoneName,
+            status: accountInfo.status || 'ACTIVE',
+          },
+        });
+      } catch (accErr) {
+        console.warn('Initial ad account link skipped on create:', (accErr as Error).message);
+        // We still created connection successfully; user can verify or add account later
+      }
+    }
+
     // Write audit log
     await prisma.auditLog.create({
       data: {
@@ -89,13 +115,13 @@ export async function POST(request: Request) {
         action: 'CREATE_CONNECTION',
         entityType: 'META_CONNECTION',
         entityId: connection.id,
-        afterJson: JSON.stringify({ connectionName, graphApiVersion, syncFrequency }),
-      }
+        afterJson: JSON.stringify({ connectionName, graphApiVersion, syncFrequency, adAccountId }),
+      },
     });
 
     return NextResponse.json({ success: true, connectionId: connection.id });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Create connection failed:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   }
 }

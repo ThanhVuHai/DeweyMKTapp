@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { MetaApiService } from '@/lib/meta';
+import { MetaApiService, MetaApiError } from '@/lib/meta';
 
 export async function POST(
   request: Request,
@@ -11,29 +11,56 @@ export async function POST(
 
     const connection = await prisma.metaConnection.findUnique({
       where: { id },
+      include: {
+        adAccounts: true,
+      },
     });
 
     if (!connection) {
-      return NextResponse.json({ error: 'Connection not found' }, { status: 404 });
+      return NextResponse.json({ error: 'Không tìm thấy kết nối' }, { status: 404 });
     }
 
     try {
+      // 1. Fetch Ad Accounts using basic 'ads_read' permissions (without business field)
       const accounts = await MetaApiService.getAdAccounts({
         encryptedAccessToken: connection.encryptedAccessToken,
         graphApiVersion: connection.graphApiVersion,
       });
 
+      if (!accounts || accounts.length === 0) {
+        return NextResponse.json({
+          success: true,
+          count: 0,
+          accounts: connection.adAccounts,
+          message: 'Không tìm thấy Ad Account nào trong me/adaccounts. Bạn có thể dùng tính năng "Nhập Ad Account ID thủ công" để liên kết trực tiếp.',
+        });
+      }
+
       const upsertedAccounts = [];
 
       for (const acc of accounts) {
+        // 2. Optional non-blocking Business Manager check (won't fail if business_management is absent)
+        let businessId = acc.businessId;
+        try {
+          const bm = await MetaApiService.getBusinessInfo(acc.accountId, {
+            encryptedAccessToken: connection.encryptedAccessToken,
+            graphApiVersion: connection.graphApiVersion,
+          });
+          if (bm?.businessId) {
+            businessId = bm.businessId;
+          }
+        } catch {
+          // Ignore, basic account discovery never depends on business_management
+        }
+
         const adAccount = await prisma.adAccount.upsert({
           where: { accountId: acc.accountId },
           update: {
             accountName: acc.accountName,
             currency: acc.currency,
             timezoneName: acc.timezoneName,
-            businessId: acc.businessId,
-            status: acc.status,
+            businessId: businessId || null,
+            status: acc.status || 'ACTIVE',
           },
           create: {
             metaConnectionId: connection.id,
@@ -41,25 +68,41 @@ export async function POST(
             accountName: acc.accountName,
             currency: acc.currency,
             timezoneName: acc.timezoneName,
-            businessId: acc.businessId,
-            status: acc.status,
+            businessId: businessId || null,
+            status: acc.status || 'ACTIVE',
           },
         });
         upsertedAccounts.push(adAccount);
       }
 
+      // Update connection status and timestamp
+      await prisma.metaConnection.update({
+        where: { id: connection.id },
+        data: {
+          status: 'connected',
+          lastTestedAt: new Date(),
+        },
+      });
+
       return NextResponse.json({
         success: true,
+        count: upsertedAccounts.length,
         accounts: upsertedAccounts,
+        message: `Đã tìm thấy và đồng bộ thành công ${upsertedAccounts.length} Ad Accounts!`,
       });
-    } catch (apiError: any) {
+    } catch (apiError: unknown) {
+      const err = apiError as MetaApiError;
+      console.error('Fetch ad accounts error:', err);
+
       return NextResponse.json({
         success: false,
-        error: apiError.message || 'Failed to fetch ad accounts',
+        error: err.userMessage || err.message || 'Lỗi khi đồng bộ danh sách Ad Accounts từ Meta API',
+        category: err.category || 'API_ERROR',
+        technicalDetails: err.technicalDetails || err.message,
       });
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Fetch accounts API error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   }
 }

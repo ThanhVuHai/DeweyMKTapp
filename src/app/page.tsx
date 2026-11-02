@@ -17,6 +17,7 @@ import KpiTab from '@/components/KpiTab';
 import MappingTab from '@/components/MappingTab';
 import ConnectionTab from '@/components/ConnectionTab';
 import AuditTab from '@/components/AuditTab';
+import DiagnosisTab from '@/components/DiagnosisTab';
 
 type SidebarTab = 
   | 'overview' 
@@ -27,7 +28,8 @@ type SidebarTab =
   | 'kpis' 
   | 'mapping' 
   | 'connections' 
-  | 'audit';
+  | 'audit'
+  | 'diagnosis';
 
 export default function DashboardPage() {
   const [activeTab, setActiveTab] = React.useState<SidebarTab>('overview');
@@ -55,11 +57,15 @@ export default function DashboardPage() {
       const res = await fetch('/api/meta/connections');
       const data = await res.json();
       if (data.connections) {
-        const list: any[] = [];
+        const map = new Map<string, any>();
         data.connections.forEach((conn: any) => {
-          if (conn.adAccounts) list.push(...conn.adAccounts);
+          if (conn.adAccounts) {
+            conn.adAccounts.forEach((acc: any) => {
+              map.set(acc.accountId, acc);
+            });
+          }
         });
-        setAccountsList(list);
+        setAccountsList(Array.from(map.values()));
       }
     } catch (_) {}
   }, []);
@@ -112,6 +118,7 @@ export default function DashboardPage() {
     { key: 'optimization', label: 'Ads Optimization', icon: Activity },
     { key: 'content', label: 'Content Performance', icon: BarChart2 },
     { key: 'funnel', label: 'Funnel Analysis', icon: Layers },
+    { key: 'diagnosis', label: 'QL Diagnosis', icon: ShieldAlert, roles: ['admin', 'manager', 'ads_specialist'] },
     { key: 'kpis', label: 'KPI Settings', icon: FolderKanban, roles: ['admin', 'manager'] },
     { key: 'mapping', label: 'Content Mapping', icon: ClipboardList, roles: ['admin', 'manager', 'ads_specialist', 'content'] },
     { key: 'connections', label: 'Meta API Settings', icon: Settings, roles: ['admin'] },
@@ -178,6 +185,8 @@ export default function DashboardPage() {
         );
       case 'audit':
         return <AuditTab triggerRefresh={triggerRefresh} />;
+      case 'diagnosis':
+        return <DiagnosisTab filters={filters} triggerRefresh={triggerRefresh} />;
       default:
         return <OverviewTab filters={filters} triggerRefresh={triggerRefresh} />;
     }
@@ -266,7 +275,9 @@ export default function DashboardPage() {
               onChange={e => setSelectedAccount(e.target.value)}
               className="bg-slate-900 border border-slate-800 text-slate-200 rounded-xl px-3.5 py-2 text-xs font-bold focus:outline-none focus:border-indigo-500"
             >
-              <option value="act_2938472948">Dewey School Global Campaigns (act_2938472948)</option>
+              {accountsList.length === 0 && (
+                <option value="act_2938472948">Dewey School Global Campaigns (act_2938472948)</option>
+              )}
               {accountsList.map(acc => (
                 <option key={acc.accountId} value={acc.accountId}>
                   {acc.accountName} ({acc.accountId})
