@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Layers, HelpCircle, ShieldAlert, AlertTriangle, CheckCircle, Info } from 'lucide-react';
+import { Layers, ShieldAlert, AlertTriangle, CheckCircle, Info } from 'lucide-react';
 import { formatPercent, formatNumber } from '@/lib/metrics';
 
 interface FunnelTabProps {
@@ -16,8 +16,27 @@ interface FunnelTabProps {
   triggerRefresh: number;
 }
 
+interface FunnelStage {
+  name: string;
+  value: number;
+  rate: number;
+}
+
+interface FunnelDiagnostic {
+  stage: string;
+  status: 'warning' | 'error' | 'success';
+  message: string;
+  metric: string;
+  benchmark: string;
+}
+
+interface FunnelData {
+  funnelStages: FunnelStage[];
+  diagnostics: FunnelDiagnostic[];
+}
+
 export default function FunnelTab({ filters, triggerRefresh }: FunnelTabProps) {
-  const [data, setData] = React.useState<any>(null);
+  const [data, setData] = React.useState<FunnelData | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -36,15 +55,16 @@ export default function FunnelTab({ filters, triggerRefresh }: FunnelTabProps) {
         });
 
         const res = await fetch(`/api/dashboard/funnel?${queryParams.toString()}`);
-        const result = await res.json();
+        const result = (await res.json()) as FunnelData & { error?: string };
         
         if (result.error) {
           setError(result.error);
         } else {
           setData(result);
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to fetch funnel data');
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to fetch funnel data';
+        setError(message);
       } finally {
         setLoading(false);
       }
@@ -61,11 +81,11 @@ export default function FunnelTab({ filters, triggerRefresh }: FunnelTabProps) {
     );
   }
 
-  if (error) {
+  if (error || !data) {
     return (
       <div className="bg-red-950/20 border border-red-500/50 text-red-200 p-6 rounded-2xl flex items-center space-x-3">
         <ShieldAlert className="w-5 h-5 text-red-400 shrink-0" />
-        <span>Lỗi tải phân tích phễu: {error}</span>
+        <span>Lỗi tải phân tích phễu: {error || 'Dữ liệu không khả dụng'}</span>
       </div>
     );
   }
@@ -85,7 +105,7 @@ export default function FunnelTab({ filters, triggerRefresh }: FunnelTabProps) {
 
         {/* CSS horizontal funnel bar stack */}
         <div className="space-y-4 pt-4">
-          {funnelStages.map((stage: any, idx: number) => {
+          {funnelStages.map((stage: FunnelStage, idx: number) => {
             // Calculate width scaling based on the first stage (Impressions) which is 100%
             const maxVal = funnelStages[0].value || 1;
             const widthPct = Math.max(12, (stage.value / maxVal) * 100);
@@ -132,10 +152,9 @@ export default function FunnelTab({ filters, triggerRefresh }: FunnelTabProps) {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {diagnostics.map((diag: any, idx: number) => {
+          {diagnostics.map((diag: FunnelDiagnostic, idx: number) => {
             const isWarning = diag.status === 'warning';
             const isError = diag.status === 'error';
-            const isSuccess = diag.status === 'success';
 
             return (
               <div 

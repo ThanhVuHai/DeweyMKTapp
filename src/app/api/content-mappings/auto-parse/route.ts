@@ -9,9 +9,9 @@ export async function POST() {
     const adsWithoutMapping = await prisma.ad.findMany({
       where: {
         contentMapping: {
-          is: null
-        }
-      }
+          is: null,
+        },
+      },
     });
 
     let count = 0;
@@ -33,7 +33,7 @@ export async function POST() {
             offer: parsed.offer,
             contentStatus: 'testing',
             note: 'Tự động phân tích từ định dạng đặt tên adName.',
-          }
+          },
         });
         parsedMappings.push(mapping);
         count++;
@@ -42,14 +42,17 @@ export async function POST() {
 
     // Write audit log if parsed any
     if (count > 0) {
-      let userId = null;
+      let userId: string | null = null;
       try {
         const cookieStore = await cookies();
         const sessionCookie = cookieStore.get('session');
         if (sessionCookie && sessionCookie.value) {
-          userId = JSON.parse(sessionCookie.value).id;
+          const parsedCookie = JSON.parse(sessionCookie.value) as { id?: string };
+          userId = parsedCookie.id || null;
         }
-      } catch (_) {}
+      } catch {
+        // Session cookie optional
+      }
 
       await prisma.auditLog.create({
         data: {
@@ -58,17 +61,18 @@ export async function POST() {
           entityType: 'CONTENT_MAPPING',
           entityId: 'BATCH',
           afterJson: JSON.stringify({ parsedCount: count, parsedMappings }),
-        }
+        },
       });
     }
 
     return NextResponse.json({
       success: true,
       message: `Tự động phân tích và tạo thành công ${count} mẫu content mapping.`,
-      count
+      count,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Auto parse content mappings failed:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

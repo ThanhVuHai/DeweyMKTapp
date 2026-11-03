@@ -26,14 +26,15 @@ export async function GET() {
       include: {
         ad: {
           include: {
-            campaign: true
-          }
-        }
-      }
+            campaign: true,
+          },
+        },
+      },
     });
     return NextResponse.json({ mappings });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -94,18 +95,21 @@ export async function POST(request: Request) {
         creator,
         contentStatus,
         note,
-      }
+      },
     });
 
     // Write audit log
-    let userId = null;
+    let userId: string | null = null;
     try {
       const cookieStore = await cookies();
       const sessionCookie = cookieStore.get('session');
       if (sessionCookie && sessionCookie.value) {
-        userId = JSON.parse(sessionCookie.value).id;
+        const parsedCookie = JSON.parse(sessionCookie.value) as { id?: string };
+        userId = parsedCookie.id || null;
       }
-    } catch (_) {}
+    } catch {
+      // Session cookie optional
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -114,11 +118,12 @@ export async function POST(request: Request) {
         entityType: 'CONTENT_MAPPING',
         entityId: mapping.id,
         afterJson: JSON.stringify(body),
-      }
+      },
     });
 
     return NextResponse.json({ success: true, mapping });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

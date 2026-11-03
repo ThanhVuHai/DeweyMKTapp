@@ -13,7 +13,6 @@ import {
   AlertCircle,
   Plus,
   Link as LinkIcon,
-  HelpCircle,
   Info,
 } from 'lucide-react';
 import { formatDate } from '@/lib/metrics';
@@ -47,6 +46,23 @@ interface MetaConnectionItem {
   adAccounts: AdAccountItem[];
 }
 
+interface DiagnosticDetails {
+  userName?: string;
+  userId?: string;
+  permissions?: string[];
+  hasAdsRead?: boolean;
+  hasBusinessManagement?: boolean;
+  linkedAccountsCount?: number;
+  status?: string;
+}
+
+interface FeedbackState {
+  type: 'success' | 'error' | 'info';
+  title: string;
+  message: string;
+  details?: DiagnosticDetails | string | null;
+}
+
 export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }: ConnectionTabProps) {
   const [connections, setConnections] = React.useState<MetaConnectionItem[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -70,9 +86,7 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
   const [syncingId, setSyncingId] = React.useState<string | null>(null);
   const [manualAccountInputs, setManualAccountInputs] = React.useState<Record<string, string>>({});
   const [addingAccountId, setAddingAccountId] = React.useState<string | null>(null);
-  const [feedbackMap, setFeedbackMap] = React.useState<
-    Record<string, { type: 'success' | 'error' | 'info'; title: string; message: string; details?: any }>
-  >({});
+  const [feedbackMap, setFeedbackMap] = React.useState<Record<string, FeedbackState>>({});
 
   React.useEffect(() => {
     async function fetchConnections() {
@@ -666,7 +680,7 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
                       </span>
                       {conn.adAccounts?.length === 0 && (
                         <span className="text-4xs text-amber-400/90 flex items-center">
-                          <Info className="w-3 h-3 mr-1" /> Chưa có account nào. Hãy bấm "Đồng bộ Accounts" hoặc nhập thủ công ở trên.
+                          <Info className="w-3 h-3 mr-1" /> Chưa có account nào. Hãy bấm &quot;Đồng bộ Accounts&quot; hoặc nhập thủ công ở trên.
                         </span>
                       )}
                     </div>
@@ -718,7 +732,7 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
                       </div>
                     ) : (
                       <div className="p-4 bg-slate-950/20 border border-dashed border-slate-850 rounded-xl text-center text-slate-500 text-3xs">
-                        Chưa liên kết tài khoản quảng cáo nào. Bấm "Đồng bộ Accounts" để tự động quét từ token, hoặc nhập mã ID vào ô phía trên.
+                        Chưa liên kết tài khoản quảng cáo nào. Bấm &quot;Đồng bộ Accounts&quot; để tự động quét từ token, hoặc nhập mã ID vào ô phía trên.
                       </div>
                     )}
                   </div>

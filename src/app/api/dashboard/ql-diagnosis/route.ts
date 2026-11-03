@@ -1,5 +1,32 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import type { CrmLead } from '@prisma/client';
+
+interface SegmentItem {
+  campus: string;
+  grade: string;
+  source: string;
+  spend: number;
+  leads: number;
+  qualifiedLeads: number;
+}
+
+interface ContentGroupItem {
+  angle: string;
+  hookType: string;
+  format: string;
+  creator: string;
+  spend: number;
+  leads: number;
+  qualifiedLeads: number;
+}
+
+interface DailyTrendItem {
+  date: string;
+  spend: number;
+  leads: number;
+  qualifiedLeads: number;
+}
 
 // Configurable statuses for lead qualification
 // - qualified_lead = directly qualified lead
@@ -20,11 +47,6 @@ function safeRate(numerator: number, denominator: number): number {
 function safeCost(spend: number, conversions: number): number | null {
   if (spend <= 0 || conversions <= 0) return null;
   return spend / conversions;
-}
-
-function safePercentageChange(current: number, historical: number): number {
-  if (!historical || historical === 0) return 0;
-  return ((current - historical) / historical) * 100;
 }
 
 export async function GET(request: Request) {
@@ -126,7 +148,7 @@ export async function GET(request: Request) {
       return true;
     };
 
-    const matchLeadFilters = (l: any) => {
+    const matchLeadFilters = (l: CrmLead) => {
       if (campusFilter && l.campus !== campusFilter) return false;
       if (gradeFilter && l.grade !== gradeFilter) return false;
       if (sourceFilter && l.source !== sourceFilter) return false;
@@ -237,7 +259,7 @@ export async function GET(request: Request) {
       }
     });
 
-    const segmentBreakdown = Array.from(segmentMap.values()).map((seg: any) => {
+    const segmentBreakdown = Array.from(segmentMap.values()).map((seg: SegmentItem) => {
       const segKpis = kpiTargets.filter(k => k.campus === seg.campus && k.grade === seg.grade && k.source === seg.source);
       const segKpiTargetQL = segKpis.reduce((sum, k) => sum + k.targetQualifiedLeads, 0);
       const segQlGap = Math.max(segKpiTargetQL - seg.qualifiedLeads, 0);
@@ -306,7 +328,7 @@ export async function GET(request: Request) {
       }
     });
 
-    const contentAttribution = Array.from(contentMap.values()).map((c: any) => ({
+    const contentAttribution = Array.from(contentMap.values()).map((c: ContentGroupItem) => ({
       angle: c.angle,
       hookType: c.hookType,
       format: c.format,
@@ -344,7 +366,7 @@ export async function GET(request: Request) {
 
     const dailyTrends = Array.from(dailyMap.values())
       .sort((a, b) => a.date.localeCompare(b.date))
-      .map((d: any) => ({
+      .map((d: DailyTrendItem) => ({
         date: d.date,
         spend: d.spend,
         leads: d.leads,
@@ -650,10 +672,11 @@ export async function GET(request: Request) {
       diagnosticsMeta,
       dataQuality
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('QL Diagnosis API error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { error: 'Internal server error: ' + error.message },
+      { error: 'Internal server error: ' + message },
       { status: 500 }
     );
   }

@@ -7,11 +7,12 @@ import { cookies } from 'next/headers';
 export async function GET() {
   try {
     const recommendations = await prisma.recommendation.findMany({
-      orderBy: { date: 'desc' }
+      orderBy: { date: 'desc' },
     });
     return NextResponse.json({ recommendations });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -25,17 +26,12 @@ export async function POST() {
     const insights = await prisma.insightsDaily.findMany({
       where: {
         level: 'ad',
-        date: { gte: defaultStart }
-      }
-    });
-
-    const adIds = Array.from(new Set(insights.map(i => i.adId)));
-    const ads = await prisma.ad.findMany({
-      where: { adId: { in: adIds } }
+        date: { gte: defaultStart },
+      },
     });
 
     const crmLeads = await prisma.crmLead.findMany({
-      where: { leadDate: { gte: defaultStart } }
+      where: { leadDate: { gte: defaultStart } },
     });
 
     // Aggregate stats by adId
@@ -79,13 +75,13 @@ export async function POST() {
 
     // Clean pending recommendations to avoid duplicates
     await prisma.recommendation.deleteMany({
-      where: { status: 'pending' }
+      where: { status: 'pending' },
     });
 
     // 2. Run rule engine for each ad
     for (const adStats of adMap.values()) {
       const rec = generateRecommendationForObject(adStats, DEFAULT_BENCHMARK);
-      
+
       // Store recommendation if it is not HOLD (or store SCALE, CUT, REFRESH, QUALITY, SALES alerts)
       if (rec.recommendationType !== 'HOLD') {
         const saved = await prisma.recommendation.create({
@@ -98,7 +94,7 @@ export async function POST() {
             reason: rec.reason,
             evidenceJson: JSON.stringify(rec.evidence),
             status: 'pending',
-          }
+          },
         });
         generatedRecommendations.push(saved);
         generatedCount++;
@@ -106,14 +102,17 @@ export async function POST() {
     }
 
     // Write audit log
-    let userId = null;
+    let userId: string | null = null;
     try {
       const cookieStore = await cookies();
       const sessionCookie = cookieStore.get('session');
       if (sessionCookie && sessionCookie.value) {
-        userId = JSON.parse(sessionCookie.value).id;
+        const parsed = JSON.parse(sessionCookie.value) as { id?: string };
+        userId = parsed.id || null;
       }
-    } catch (_) {}
+    } catch {
+      // Session cookie optional
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -122,7 +121,7 @@ export async function POST() {
         entityType: 'RECOMMENDATION',
         entityId: 'ALL',
         afterJson: JSON.stringify({ count: generatedCount }),
-      }
+      },
     });
 
     return NextResponse.json({
@@ -131,8 +130,9 @@ export async function POST() {
       count: generatedCount,
       data: generatedRecommendations,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Generate recommendations failed:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

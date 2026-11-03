@@ -60,7 +60,7 @@ export async function GET(request: Request) {
     });
 
     // Filter insights based on Content Mapping
-    let filteredInsights = insights.filter(i => {
+    const filteredInsights = insights.filter(i => {
       const mapping = adMappingMap.get(i.adId);
       if (campusFilter && (!mapping || mapping.campus !== campusFilter)) return false;
       if (gradeFilter && (!mapping || mapping.grade !== gradeFilter)) return false;
@@ -296,10 +296,11 @@ export async function GET(request: Request) {
       topAdsByCtr,
       worstAdsReview,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Overview API error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { error: 'Internal server error: ' + error.message },
+      { error: 'Internal server error: ' + message },
       { status: 500 }
     );
   }

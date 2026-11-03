@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Clipboard, ShieldAlert, Sparkles, Edit3, Trash2, Search, X, Check } from 'lucide-react';
+import { Clipboard, ShieldAlert, Sparkles, Edit3, Search, X, Check } from 'lucide-react';
 
 interface MappingTabProps {
   currentRole: string;
@@ -9,9 +9,28 @@ interface MappingTabProps {
   onRefresh: () => void;
 }
 
+interface MappedContent {
+  id?: string;
+  adId?: string;
+  contentId?: string | null;
+  campus?: string | null;
+  grade?: string | null;
+  funnelStage?: string | null;
+  angle?: string | null;
+  hookType?: string | null;
+  format?: string | null;
+  offer?: string | null;
+  note?: string | null;
+}
+
+interface AdItemWithMapping {
+  id: string;
+  name: string;
+  contentMapping?: MappedContent | null;
+}
+
 export default function MappingTab({ currentRole, triggerRefresh, onRefresh }: MappingTabProps) {
-  const [mappings, setMappings] = React.useState<any[]>([]);
-  const [ads, setAds] = React.useState<any[]>([]);
+  const [ads, setAds] = React.useState<AdItemWithMapping[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   
@@ -19,7 +38,7 @@ export default function MappingTab({ currentRole, triggerRefresh, onRefresh }: M
   const [search, setSearch] = React.useState('');
   
   // Edit Form Modal State
-  const [editingAd, setEditingAd] = React.useState<any | null>(null);
+  const [editingAd, setEditingAd] = React.useState<AdItemWithMapping | null>(null);
   const [contentId, setContentId] = React.useState('');
   const [campus, setCampus] = React.useState('CG');
   const [grade, setGrade] = React.useState('G6');
@@ -40,19 +59,16 @@ export default function MappingTab({ currentRole, triggerRefresh, onRefresh }: M
         // Fetch ads from API to map
         // In MVP, we query Ads and join on frontend with Content Mappings
         const adsRes = await fetch('/api/dashboard/ads-optimization?level=ad');
-        const adsData = await adsRes.json();
-        
-        const mapRes = await fetch('/api/content-mappings');
-        const mapData = await mapRes.json();
+        const adsData = (await adsRes.json()) as { data?: AdItemWithMapping[]; error?: string };
 
-        if (adsData.error || mapData.error) {
-          setError(adsData.error || mapData.error);
+        if (adsData.error) {
+          setError(adsData.error);
         } else {
           setAds(adsData.data || []);
-          setMappings(mapData.mappings || []);
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to fetch content mapping structures');
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to fetch content mapping structures';
+        setError(message);
       } finally {
         setLoading(false);
       }
@@ -60,7 +76,7 @@ export default function MappingTab({ currentRole, triggerRefresh, onRefresh }: M
     fetchData();
   }, [triggerRefresh]);
 
-  const handleOpenEdit = (item: any) => {
+  const handleOpenEdit = (item: AdItemWithMapping) => {
     setEditingAd(item);
     // Populate form with existing mapping if any
     const existing = item.contentMapping;
@@ -123,8 +139,9 @@ export default function MappingTab({ currentRole, triggerRefresh, onRefresh }: M
       } else {
         alert(result.error || 'Failed to save mapping');
       }
-    } catch (err: any) {
-      alert('Error: ' + err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      alert('Error: ' + message);
     } finally {
       setSubmitting(false);
     }
@@ -142,8 +159,9 @@ export default function MappingTab({ currentRole, triggerRefresh, onRefresh }: M
       } else {
         alert(result.error || 'Auto-parsing failed');
       }
-    } catch (err: any) {
-      alert('Error: ' + err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      alert('Error: ' + message);
     } finally {
       setAutoParsing(false);
     }
@@ -219,7 +237,7 @@ export default function MappingTab({ currentRole, triggerRefresh, onRefresh }: M
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/40 text-slate-350">
-                {filteredAds.map((item: any) => {
+                {filteredAds.map((item: AdItemWithMapping) => {
                   const mapping = item.contentMapping;
                   const hasMapping = !!mapping && !!mapping.contentId;
 

@@ -1,15 +1,32 @@
 'use client';
 
 import React from 'react';
-import { ClipboardList, ShieldAlert, Clock, Eye, Code } from 'lucide-react';
-import { formatDate } from '@/lib/metrics';
+import { ClipboardList, ShieldAlert, Clock, Code } from 'lucide-react';
 
 interface AuditTabProps {
   triggerRefresh: number;
 }
 
+interface AuditLogUser {
+  name: string;
+  email: string;
+  role: string;
+}
+
+interface AuditLogEntry {
+  id: string;
+  userId?: string | null;
+  user?: AuditLogUser | null;
+  action: string;
+  entityType: string;
+  entityId: string;
+  beforeJson?: string | null;
+  afterJson?: string | null;
+  createdAt: string;
+}
+
 export default function AuditTab({ triggerRefresh }: AuditTabProps) {
-  const [logs, setLogs] = React.useState<any[]>([]);
+  const [logs, setLogs] = React.useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [expandedLogId, setExpandedLogId] = React.useState<string | null>(null);
@@ -20,14 +37,15 @@ export default function AuditTab({ triggerRefresh }: AuditTabProps) {
       setError(null);
       try {
         const res = await fetch('/api/audit-logs');
-        const result = await res.json();
+        const result = (await res.json()) as { logs?: AuditLogEntry[]; error?: string };
         if (result.error) {
           setError(result.error);
         } else {
           setLogs(result.logs || []);
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to load audit logs');
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to load audit logs';
+        setError(message);
       } finally {
         setLoading(false);
       }
@@ -78,7 +96,7 @@ export default function AuditTab({ triggerRefresh }: AuditTabProps) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/40 text-slate-300">
-                {logs.map((log: any) => {
+                {logs.map((log: AuditLogEntry) => {
                   const isExpanded = expandedLogId === log.id;
                   const dateLocal = new Date(log.createdAt).toLocaleString('vi-VN');
 

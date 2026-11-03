@@ -1,9 +1,9 @@
 'use client';
 
 import React from 'react';
-import { 
-  Activity, Users, DollarSign, Target, Award, ShieldAlert, 
-  AlertTriangle, CheckCircle, Info, ChevronDown, ChevronUp, RefreshCw 
+import {
+  Activity, Users, DollarSign, Target, Award, ShieldAlert,
+  AlertTriangle, CheckCircle, Info, ChevronDown, ChevronUp
 } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
@@ -19,8 +19,100 @@ interface DiagnosisTabProps {
   triggerRefresh: number;
 }
 
+interface DiagnosisAlert {
+  id?: string;
+  type?: string;
+  title: string;
+  severity: 'high' | 'medium' | 'low';
+  confidence: 'high' | 'medium' | 'low';
+  message: string;
+  rootCause: string;
+  recommendedActions: string[];
+  actionRequired?: string;
+}
+
+interface SkippedRule {
+  ruleName?: string;
+  type?: string;
+  reason: string;
+}
+
+interface SegmentBreakdownItem {
+  campus: string;
+  grade: string;
+  source: string;
+  spend: number;
+  leads: number;
+  qualifiedLeads: number;
+  leadToQlRate: number;
+  cpql: number | null;
+  status: string;
+  kpiTargetQL?: number;
+}
+
+interface ContentAttributionItem {
+  angle: string;
+  hookType: string;
+  format: string;
+  creator: string;
+  spend: number;
+  leads: number;
+  qualifiedLeads: number;
+  leadToQlRate: number;
+  cpl: number | null;
+  cpql: number | null;
+}
+
+interface DailyTrendDiagnosis {
+  date: string;
+  spend: number;
+  leads: number;
+  qualifiedLeads: number;
+  leadToQlRate: number;
+  cpl: number | null;
+  cpql: number | null;
+}
+
+interface DiagnosisSummary {
+  spend: number;
+  impressions: number;
+  leads: number;
+  cpl: number | null;
+  qualifiedLeads: number;
+  kpiTargetQL: number;
+  qlForecast: number | null;
+  forecastNote?: string;
+  cpql: number | null;
+  leadToQlRate: number;
+}
+
+interface DiagnosticsMeta {
+  rulesEvaluated: number;
+  alertsTriggered: number;
+  scannedRulesCount?: number;
+  activeAlertsCount?: number;
+  skippedRules: SkippedRule[];
+}
+
+interface DataQuality {
+  unmatchedCrmLeads: number;
+  unmatchedInsights: number;
+  unattributedQualifiedLeads: number;
+  warnings: string[];
+}
+
+interface DiagnosisData {
+  summary: DiagnosisSummary;
+  diagnostics: DiagnosisAlert[];
+  diagnosticsMeta: DiagnosticsMeta;
+  segmentBreakdown: SegmentBreakdownItem[];
+  contentAttribution: ContentAttributionItem[];
+  dailyTrends: DailyTrendDiagnosis[];
+  dataQuality: DataQuality;
+}
+
 export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabProps) {
-  const [data, setData] = React.useState<any>(null);
+  const [data, setData] = React.useState<DiagnosisData | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [expandedSkipped, setExpandedSkipped] = React.useState(false);
@@ -56,8 +148,9 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
         }
 
         setData(result);
-      } catch (err: any) {
-        setError(err.message || 'An unexpected error occurred.');
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'An unexpected error occurred.';
+        setError(message);
       } finally {
         setLoading(false);
       }
@@ -149,7 +242,7 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
     {
       title: 'Qualified Leads (QL)',
       value: `${formatNumber(summary.qualifiedLeads)} / ${formatNumber(summary.kpiTargetQL)} QL`,
-      sub: summary.qlForecast !== null 
+      sub: summary.qlForecast !== null
         ? `Dự báo cuối tháng: ${formatNumber(summary.qlForecast)} QL`
         : `Dự báo: N/A (${summary.forecastNote})`,
       icon: Target,
@@ -191,7 +284,7 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
 
       {/* 2. Data Quality Audit Banner */}
       <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl overflow-hidden shadow-xl">
-        <button 
+        <button
           onClick={() => setDataQualityCollapsed(!dataQualityCollapsed)}
           className="w-full flex items-center justify-between px-6 py-4 hover:bg-slate-800/10 transition-all text-left"
         >
@@ -268,7 +361,7 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
 
             {/* Expand skipped reasons */}
             <div className="pt-2">
-              <button 
+              <button
                 onClick={() => setExpandedSkipped(!expandedSkipped)}
                 className="text-indigo-400 hover:text-indigo-300 font-extrabold text-xs transition-colors flex items-center mx-auto space-x-1"
               >
@@ -281,7 +374,7 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
               <div className="bg-slate-950/40 border border-slate-850 p-4 rounded-xl text-left max-w-xl mx-auto space-y-2.5">
                 <span className="text-3xs font-extrabold text-indigo-300 uppercase tracking-wider block">Nhật ký quy tắc đã quét:</span>
                 <div className="space-y-1.5 text-xs">
-                  {diagnosticsMeta.skippedRules.map((skip: any, idx: number) => (
+                  {diagnosticsMeta.skippedRules.map((skip: SkippedRule, idx: number) => (
                     <div key={idx} className="flex items-start space-x-2 bg-slate-900/50 p-2.5 rounded border border-slate-850/30">
                       <Info className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
                       <div>
@@ -296,16 +389,16 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {diagnostics.map((alert: any, idx: number) => {
+            {diagnostics.map((alert: DiagnosisAlert, idx: number) => {
               const isHigh = alert.severity === 'high';
-              const confColors = 
+              const confColors =
                 alert.confidence === 'high' ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' :
                 alert.confidence === 'medium' ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' :
                 'bg-slate-800/40 text-slate-300 border-slate-700/50';
 
               return (
-                <div 
-                  key={idx} 
+                <div
+                  key={idx}
                   className={`bg-slate-900/60 border rounded-2xl p-6 shadow-xl space-y-4 flex flex-col justify-between ${isHigh ? 'border-rose-500/30' : 'border-amber-500/30'}`}
                 >
                   <div className="space-y-3">
@@ -317,7 +410,7 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
                     </div>
 
                     <p className="text-xs text-slate-400 leading-relaxed">{alert.message}</p>
-                    
+
                     <div className="text-2xs bg-slate-950/20 border border-slate-850 p-3 rounded-xl">
                       <span className="font-bold text-slate-300 block mb-1">Nguyên nhân cốt lõi (Root Cause):</span>
                       <span className="text-slate-400">{alert.rootCause}</span>
@@ -368,11 +461,11 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
               <XAxis dataKey="date" tickFormatter={d => d.substring(8,10) + '/' + d.substring(5,7)} stroke="#64748b" tick={{ fontSize: 9 }} />
               <YAxis yAxisId="left" stroke="#6366f1" tickFormatter={v => formatNumber(v)} tick={{ fontSize: 9 }} />
               <YAxis yAxisId="right" orientation="right" stroke="#14b8a6" tick={{ fontSize: 9 }} />
-              <Tooltip 
+              <Tooltip
                 contentStyle={{ backgroundColor: '#0b1325', borderColor: '#334155', borderRadius: '12px' }}
                 labelFormatter={d => d}
-                formatter={(value: any, name: any) => [
-                  name === 'spend' ? formatVNDValue(value) : value, 
+                formatter={(value: unknown, name: unknown) => [
+                  name === 'spend' ? formatVNDValue(Number(value)) : String(value),
                   name === 'spend' ? 'Spend' : 'QLs'
                 ]}
               />
@@ -385,7 +478,7 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
 
       {/* 5. Breakdown Tables */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        
+
         {/* Segment Breakdown */}
         <div className="bg-slate-900/60 border border-slate-800/80 p-6 rounded-3xl shadow-xl flex flex-col justify-between">
           <div className="space-y-4">
@@ -393,7 +486,7 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
               <h3 className="font-extrabold text-md text-slate-200 uppercase tracking-wider">Phân tích Segment (Breakdown)</h3>
               <p className="text-xs text-slate-400 mt-0.5">Hiệu suất chi tiết của từng Campus, Grade, và Source</p>
             </div>
-            
+
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
@@ -408,7 +501,7 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-850">
-                  {segmentBreakdown.map((seg: any, index: number) => {
+                  {segmentBreakdown.map((seg: SegmentBreakdownItem, index: number) => {
                     let statusColor = 'bg-emerald-500';
                     let statusText = 'On Track';
                     if (seg.status === 'critical') {
@@ -467,7 +560,7 @@ export default function DiagnosisTab({ filters, triggerRefresh }: DiagnosisTabPr
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-850">
-                  {contentAttribution.map((c: any, index: number) => (
+                  {contentAttribution.map((c: ContentAttributionItem, index: number) => (
                     <tr key={index} className="hover:bg-slate-850/20 transition-all text-slate-300">
                       <td className="py-3 font-medium">
                         <span className="block text-slate-200 truncate max-w-[120px]" title={c.angle}>{c.angle}</span>

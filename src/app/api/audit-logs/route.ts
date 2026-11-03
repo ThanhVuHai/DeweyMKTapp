@@ -10,15 +10,16 @@ export async function GET() {
           select: {
             name: true,
             email: true,
-            role: true
-          }
-        }
+            role: true,
+          },
+        },
       },
-      take: 100 // Limit to last 100 entries for security & speed
+      take: 100, // Limit to last 100 entries for security & speed
     });
     return NextResponse.json({ logs });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('List audit logs failed:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

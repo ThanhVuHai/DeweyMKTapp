@@ -1,9 +1,55 @@
 'use client';
 
 import React from 'react';
-import { AreaChart, Area, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { ArrowUpRight, ArrowDownRight, Activity, Users, DollarSign, Target, Award, ShieldAlert, Sparkles, TrendingUp, AlertTriangle } from 'lucide-react';
+import { AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { Activity, Users, DollarSign, Target, Award, ShieldAlert, Sparkles, TrendingUp, AlertTriangle } from 'lucide-react';
 import { formatVND, formatPercent, formatNumber, formatDate, formatVNDFull } from '@/lib/metrics';
+
+interface OverviewSummary {
+  spend: number;
+  targetBudget: number;
+  leads: number;
+  targetLeads: number;
+  cpl: number;
+  qualifiedLeads: number;
+  leadToQlRate: number;
+  pacingGap: number;
+  budgetUsedPct: number;
+  timePassedPct: number;
+}
+
+interface CampaignSummaryItem {
+  id: string;
+  name: string;
+  spend: number;
+  leads: number;
+  cpl: number;
+}
+
+interface AdSummaryItem {
+  id: string;
+  name: string;
+  impressions: number;
+  leads: number;
+  ctr: number;
+}
+
+interface DailyTrendItem {
+  date: string;
+  spend: number;
+  leads: number;
+  cpl: number;
+}
+
+interface OverviewData {
+  summary: OverviewSummary;
+  dailyTrends: DailyTrendItem[];
+  topCampaignsByLeads: CampaignSummaryItem[];
+  worstCampaignsByCpl: CampaignSummaryItem[];
+  topAdsByCtr: AdSummaryItem[];
+  isEmpty?: boolean;
+  error?: string;
+}
 
 interface OverviewTabProps {
   filters: {
@@ -18,7 +64,7 @@ interface OverviewTabProps {
 }
 
 export default function OverviewTab({ filters, triggerRefresh }: OverviewTabProps) {
-  const [data, setData] = React.useState<any>(null);
+  const [data, setData] = React.useState<OverviewData | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -38,14 +84,14 @@ export default function OverviewTab({ filters, triggerRefresh }: OverviewTabProp
 
         const res = await fetch(`/api/dashboard/overview?${queryParams.toString()}`);
         const result = await res.json();
-        
+
         if (result.error) {
           setError(result.error);
         } else {
           setData(result);
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to fetch overview data');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to fetch overview data');
       } finally {
         setLoading(false);
       }
@@ -93,7 +139,7 @@ export default function OverviewTab({ filters, triggerRefresh }: OverviewTabProp
     );
   }
 
-  const { summary, dailyTrends, topCampaignsByLeads, worstCampaignsByCpl, topAdsByCtr, worstAdsReview } = data;
+  const { summary, dailyTrends, topCampaignsByLeads, worstCampaignsByCpl, topAdsByCtr } = data;
 
   const cards = [
     {
@@ -224,11 +270,11 @@ export default function OverviewTab({ filters, triggerRefresh }: OverviewTabProp
                 <XAxis dataKey="date" tickFormatter={d => d.substring(8,10) + '/' + d.substring(5,7)} stroke="#64748b" tick={{ fontSize: 10 }} />
                 <YAxis yAxisId="left" stroke="#6366f1" tickFormatter={v => formatVND(v)} tick={{ fontSize: 10 }} />
                 <YAxis yAxisId="right" orientation="right" stroke="#14b8a6" tick={{ fontSize: 10 }} />
-                <Tooltip 
+                <Tooltip
                   contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '12px' }}
                   labelFormatter={d => formatDate(d)}
-                  formatter={(value: any, name: any) => [
-                    name === 'spend' ? formatVNDFull(value) : value, 
+                  formatter={(value: unknown, name: unknown) => [
+                    name === 'spend' ? formatVNDFull(Number(value) || 0) : String(value ?? 0),
                     name === 'spend' ? 'Spend' : 'Leads'
                   ]}
                 />
@@ -250,10 +296,10 @@ export default function OverviewTab({ filters, triggerRefresh }: OverviewTabProp
                 <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.3} />
                 <XAxis dataKey="date" tickFormatter={d => d.substring(8,10)} stroke="#64748b" tick={{ fontSize: 10 }} />
                 <YAxis stroke="#a78bfa" tickFormatter={v => formatVND(v)} tick={{ fontSize: 10 }} />
-                <Tooltip 
+                <Tooltip
                   contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '12px' }}
                   labelFormatter={d => formatDate(d)}
-                  formatter={(value: any) => [formatVNDFull(value), 'CPL']}
+                  formatter={(value: unknown) => [formatVNDFull(Number(value) || 0), 'CPL']}
                 />
                 <Line type="monotone" dataKey="cpl" stroke="#a78bfa" strokeWidth={3} activeDot={{ r: 8 }} dot={{ r: 2 }} />
               </LineChart>
@@ -270,7 +316,7 @@ export default function OverviewTab({ filters, triggerRefresh }: OverviewTabProp
             <TrendingUp className="w-5 h-5 text-teal-400 mr-2" /> Top Campaigns ra nhiều Lead
           </h3>
           <div className="divide-y divide-slate-800/80 max-h-96 overflow-y-auto space-y-3">
-            {topCampaignsByLeads.map((c: any) => (
+            {topCampaignsByLeads.map((c: CampaignSummaryItem) => (
               <div key={c.id} className="flex justify-between items-center py-2.5">
                 <div className="max-w-[70%]">
                   <span className="font-bold text-xs text-slate-300 block truncate" title={c.name}>{c.name}</span>
@@ -291,7 +337,7 @@ export default function OverviewTab({ filters, triggerRefresh }: OverviewTabProp
             <AlertTriangle className="w-5 h-5 text-rose-400 mr-2" /> Campaigns CPL đắt đỏ
           </h3>
           <div className="divide-y divide-slate-800/80 max-h-96 overflow-y-auto space-y-3">
-            {worstCampaignsByCpl.map((c: any) => (
+            {worstCampaignsByCpl.map((c: CampaignSummaryItem) => (
               <div key={c.id} className="flex justify-between items-center py-2.5">
                 <div className="max-w-[70%]">
                   <span className="font-bold text-xs text-slate-300 block truncate" title={c.name}>{c.name}</span>
@@ -312,7 +358,7 @@ export default function OverviewTab({ filters, triggerRefresh }: OverviewTabProp
             <Sparkles className="w-5 h-5 text-indigo-400 mr-2" /> Mẫu Ads kéo CTR tốt nhất
           </h3>
           <div className="divide-y divide-slate-800/80 max-h-96 overflow-y-auto space-y-3">
-            {topAdsByCtr.map((ad: any) => (
+            {topAdsByCtr.map((ad: AdSummaryItem) => (
               <div key={ad.id} className="flex justify-between items-center py-2.5">
                 <div className="max-w-[70%]">
                   <span className="font-bold text-xs text-slate-300 block truncate" title={ad.name}>{ad.name}</span>

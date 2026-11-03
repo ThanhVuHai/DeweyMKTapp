@@ -31,6 +31,20 @@ type SidebarTab =
   | 'audit'
   | 'diagnosis';
 
+interface AdAccountOption {
+  accountId: string;
+  accountName: string;
+  currency?: string;
+  timezoneName?: string;
+  status?: string | null;
+}
+
+interface ConnectionItem {
+  id: string;
+  connectionName: string;
+  adAccounts?: AdAccountOption[];
+}
+
 export default function DashboardPage() {
   const [activeTab, setActiveTab] = React.useState<SidebarTab>('overview');
   const [isSidebarOpen, setIsSidebarOpen] = React.useState(true);
@@ -49,30 +63,36 @@ export default function DashboardPage() {
   const [triggerRefresh, setTriggerRefresh] = React.useState(0);
   const [syncing, setSyncing] = React.useState(false);
   const [seeding, setSeeding] = React.useState(false);
-  const [accountsList, setAccountsList] = React.useState<any[]>([]);
+  const [accountsList, setAccountsList] = React.useState<AdAccountOption[]>([]);
 
   // Fetch Accounts to populate dropdown
-  const loadAccounts = React.useCallback(async () => {
-    try {
-      const res = await fetch('/api/meta/connections');
-      const data = await res.json();
-      if (data.connections) {
-        const map = new Map<string, any>();
-        data.connections.forEach((conn: any) => {
-          if (conn.adAccounts) {
-            conn.adAccounts.forEach((acc: any) => {
-              map.set(acc.accountId, acc);
-            });
-          }
-        });
-        setAccountsList(Array.from(map.values()));
-      }
-    } catch (_) {}
-  }, []);
-
   React.useEffect(() => {
+    let ignore = false;
+    async function loadAccounts() {
+      try {
+        const res = await fetch('/api/meta/connections');
+        const data = (await res.json()) as { connections?: ConnectionItem[] };
+        if (!ignore && data.connections) {
+          const map = new Map<string, AdAccountOption>();
+          data.connections.forEach(conn => {
+            if (conn.adAccounts) {
+              conn.adAccounts.forEach(acc => {
+                map.set(acc.accountId, acc);
+              });
+            }
+          });
+          setAccountsList(Array.from(map.values()));
+        }
+      } catch {
+        // Ignored
+      }
+    }
+
     loadAccounts();
-  }, [triggerRefresh, loadAccounts]);
+    return () => {
+      ignore = true;
+    };
+  }, [triggerRefresh]);
 
   const handleSyncNow = async () => {
     setSyncing(true);
@@ -86,8 +106,9 @@ export default function DashboardPage() {
       } else {
         alert(result.error || 'Sync failed');
       }
-    } catch (err: any) {
-      alert('Error: ' + err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      alert('Error: ' + message);
     } finally {
       setSyncing(false);
     }
@@ -105,8 +126,9 @@ export default function DashboardPage() {
       } else {
         alert(result.error || 'Seed failed');
       }
-    } catch (err: any) {
-      alert('Error: ' + err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      alert('Error: ' + message);
     } finally {
       setSeeding(false);
     }
@@ -311,6 +333,18 @@ export default function DashboardPage() {
               <option value="G1">G1 (Khối 1)</option>
               <option value="G6">G6 (Khối 6)</option>
               <option value="G10">G10 (Khối 10)</option>
+            </select>
+
+            {/* Source selector */}
+            <select
+              value={source}
+              onChange={e => setSource(e.target.value)}
+              className="bg-slate-900 border border-slate-800 text-slate-200 rounded-xl px-3 py-1.5 text-xs font-semibold focus:outline-none"
+            >
+              <option value="">Nguồn (Source)</option>
+              <option value="LeadAds">LeadAds</option>
+              <option value="Messenger">Messenger</option>
+              <option value="Conversion">Conversion</option>
             </select>
 
             {/* Date Range selectors */}

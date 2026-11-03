@@ -14,6 +14,99 @@ export interface MetaAccountInfo {
   status?: string;
 }
 
+export interface MetaCampaignRecord {
+  id: string;
+  name?: string;
+  objective?: string;
+  buying_type?: string;
+  status?: string;
+  effective_status?: string;
+  daily_budget?: string;
+  lifetime_budget?: string;
+  start_time?: string;
+  stop_time?: string;
+  created_time?: string;
+  updated_time?: string;
+}
+
+export interface MetaAdSetRecord {
+  id: string;
+  campaign_id?: string;
+  name?: string;
+  optimization_goal?: string;
+  billing_event?: string;
+  bid_strategy?: string;
+  daily_budget?: string;
+  lifetime_budget?: string;
+  targeting?: Record<string, unknown>;
+  status?: string;
+  effective_status?: string;
+  start_time?: string;
+  end_time?: string;
+}
+
+export interface MetaAdRecord {
+  id: string;
+  campaign_id?: string;
+  adset_id?: string;
+  name?: string;
+  creative?: { id?: string };
+  status?: string;
+  effective_status?: string;
+  created_time?: string;
+  updated_time?: string;
+}
+
+export interface MetaCreativeRecord {
+  id: string;
+  name?: string;
+  title?: string;
+  body?: string;
+  image_url?: string;
+  thumbnail_url?: string;
+  video_id?: string;
+  object_story_id?: string;
+  call_to_action_type?: string;
+  object_url?: string;
+}
+
+export interface MetaInsightRecord {
+  date_start?: string;
+  date_stop?: string;
+  account_id?: string;
+  account_name?: string;
+  campaign_id?: string;
+  campaign_name?: string;
+  adset_id?: string;
+  adset_name?: string;
+  ad_id?: string;
+  ad_name?: string;
+  spend?: string;
+  impressions?: string;
+  reach?: string;
+  clicks?: string;
+  inline_link_clicks?: string;
+  actions?: Array<{ action_type: string; value: string }>;
+  cost_per_action_type?: Array<{ action_type: string; value: string }>;
+  video_3sec_video_view?: Array<{ action_type: string; value: string }>;
+  video_thruplay_watched_actions?: Array<{ action_type: string; value: string }>;
+  video_p25_watched_actions?: Array<{ action_type: string; value: string }>;
+  video_p50_watched_actions?: Array<{ action_type: string; value: string }>;
+  video_p75_watched_actions?: Array<{ action_type: string; value: string }>;
+  video_p95_watched_actions?: Array<{ action_type: string; value: string }>;
+  video_p100_watched_actions?: Array<{ action_type: string; value: string }>;
+  [key: string]: unknown;
+}
+
+interface MetaRawAccount {
+  id?: string;
+  account_id?: string;
+  name?: string;
+  currency?: string;
+  timezone_name?: string;
+  account_status?: number;
+}
+
 export type MetaErrorCategory =
   | 'TOKEN_EXPIRED'
   | 'MISSING_ADS_READ'
@@ -179,11 +272,11 @@ export class MetaApiService {
    * Helper to make requests to the Meta Graph API.
    * Handles dynamic API versioning and token assignment.
    */
-  public static async requestMetaAPI(
+  public static async requestMetaAPI<T = Record<string, unknown>>(
     endpoint: string,
     connection: MetaConnectionParam,
     params: Record<string, string> = {}
-  ): Promise<any> {
+  ): Promise<T> {
     const version = connection.graphApiVersion || 'v25.0';
     const token = this.getDecryptedToken(connection);
 
@@ -193,7 +286,7 @@ export class MetaApiService {
       token === 'mock-token' ||
       token.startsWith('test-token-')
     ) {
-      return this.handleMockRequest(endpoint, params, token);
+      return this.handleMockRequest(endpoint, params, token) as T;
     }
 
     const queryParams = new URLSearchParams({
@@ -215,7 +308,7 @@ export class MetaApiService {
         throw parseMetaError(data);
       }
 
-      return data;
+      return data as T;
     } catch (error: unknown) {
       if (error instanceof MetaApiError) {
         throw error;
@@ -236,7 +329,7 @@ export class MetaApiService {
     endpoint: string,
     params: Record<string, string>,
     token: string
-  ): any {
+  ): Record<string, unknown> {
     // Simulated error conditions for automated testing
     if (token === 'test-token-expired') {
       throw new MetaApiError('Error validating access token: Session has expired', {
@@ -328,7 +421,7 @@ export class MetaApiService {
    */
   public static async validateAccessToken(connection: MetaConnectionParam): Promise<boolean> {
     try {
-      const data = await this.requestMetaAPI('me', connection, { fields: 'id,name' });
+      const data = await this.requestMetaAPI<{ id?: string }>('me', connection, { fields: 'id,name' });
       return !!data.id;
     } catch (error) {
       console.error('Validation failed:', error);
@@ -348,11 +441,11 @@ export class MetaApiService {
     hasAdsRead: boolean;
     hasBusinessManagement: boolean;
   }> {
-    const me = await this.requestMetaAPI('me', connection, { fields: 'id,name' });
+    const me = await this.requestMetaAPI<{ id?: string; name?: string }>('me', connection, { fields: 'id,name' });
     let permissions: string[] = [];
 
     try {
-      const permsRes = await this.requestMetaAPI('me/permissions', connection);
+      const permsRes = await this.requestMetaAPI<{ data?: Array<{ permission: string; status?: string }> }>('me/permissions', connection);
       if (Array.isArray(permsRes?.data)) {
         permissions = permsRes.data
           .filter((p: { status?: string; permission?: string }) => p.status === 'granted')
@@ -383,14 +476,14 @@ export class MetaApiService {
    * 'business_management' permission will NEVER fail with (#100).
    */
   public static async getAdAccounts(connection: MetaConnectionParam): Promise<MetaAccountInfo[]> {
-    const data = await this.requestMetaAPI('me/adaccounts', connection, {
+    const data = await this.requestMetaAPI<{ data?: MetaRawAccount[] }>('me/adaccounts', connection, {
       fields: 'id,account_id,name,currency,timezone_name,account_status',
       limit: '50',
     });
 
     if (!data.data || !Array.isArray(data.data)) return [];
 
-    return data.data.map((acc: any) => ({
+    return data.data.map((acc: MetaRawAccount) => ({
       accountId: acc.id || (acc.account_id ? `act_${acc.account_id}` : ''),
       accountName: acc.name || `Ad Account ${acc.account_id || acc.id}`,
       currency: acc.currency || 'VND',
@@ -410,7 +503,7 @@ export class MetaApiService {
     connection: MetaConnectionParam
   ): Promise<MetaAccountInfo> {
     const normalizedId = normalizeAdAccountId(adAccountId);
-    const data = await this.requestMetaAPI(normalizedId, connection, {
+    const data = await this.requestMetaAPI<MetaRawAccount>(normalizedId, connection, {
       fields: 'id,account_id,name,currency,timezone_name,account_status',
     });
 
@@ -435,7 +528,7 @@ export class MetaApiService {
   ): Promise<{ businessId?: string; businessName?: string } | null> {
     const normalizedId = normalizeAdAccountId(adAccountId);
     try {
-      const data = await this.requestMetaAPI(normalizedId, connection, {
+      const data = await this.requestMetaAPI<{ business?: { id?: string; name?: string } }>(normalizedId, connection, {
         fields: 'business{id,name}',
       });
 
@@ -456,16 +549,16 @@ export class MetaApiService {
   /**
    * Fetch list of Campaigns in an Account
    */
-  public static async getCampaigns(adAccountId: string, connection: MetaConnectionParam): Promise<any[]> {
+  public static async getCampaigns(adAccountId: string, connection: MetaConnectionParam): Promise<MetaCampaignRecord[]> {
     const normalizedId = normalizeAdAccountId(adAccountId);
-    let results: any[] = [];
+    let results: MetaCampaignRecord[] = [];
     const endpoint = `${normalizedId}/campaigns`;
     const params: Record<string, string> = {
       fields: 'id,name,objective,buying_type,status,effective_status,daily_budget,lifetime_budget,start_time,stop_time,created_time,updated_time',
       limit: '100',
     };
 
-    const response = await this.requestMetaAPI(endpoint, connection, params);
+    const response = await this.requestMetaAPI<{ data?: MetaCampaignRecord[] }>(endpoint, connection, params);
     if (response.data) results = response.data;
     
     return results;
@@ -474,10 +567,10 @@ export class MetaApiService {
   /**
    * Fetch list of Ad Sets in an Account
    */
-  public static async getAdSets(adAccountId: string, connection: MetaConnectionParam): Promise<any[]> {
+  public static async getAdSets(adAccountId: string, connection: MetaConnectionParam): Promise<MetaAdSetRecord[]> {
     const normalizedId = normalizeAdAccountId(adAccountId);
-    let results: any[] = [];
-    const response = await this.requestMetaAPI(`${normalizedId}/adsets`, connection, {
+    let results: MetaAdSetRecord[] = [];
+    const response = await this.requestMetaAPI<{ data?: MetaAdSetRecord[] }>(`${normalizedId}/adsets`, connection, {
       fields: 'id,campaign_id,name,optimization_goal,billing_event,bid_strategy,daily_budget,lifetime_budget,targeting,status,effective_status,start_time,end_time',
       limit: '100',
     });
@@ -488,10 +581,10 @@ export class MetaApiService {
   /**
    * Fetch list of Ads in an Account
    */
-  public static async getAds(adAccountId: string, connection: MetaConnectionParam): Promise<any[]> {
+  public static async getAds(adAccountId: string, connection: MetaConnectionParam): Promise<MetaAdRecord[]> {
     const normalizedId = normalizeAdAccountId(adAccountId);
-    let results: any[] = [];
-    const response = await this.requestMetaAPI(`${normalizedId}/ads`, connection, {
+    let results: MetaAdRecord[] = [];
+    const response = await this.requestMetaAPI<{ data?: MetaAdRecord[] }>(`${normalizedId}/ads`, connection, {
       fields: 'id,campaign_id,adset_id,name,creative,status,effective_status,created_time,updated_time',
       limit: '100',
     });
@@ -502,10 +595,10 @@ export class MetaApiService {
   /**
    * Fetch list of Creatives in an Account
    */
-  public static async getCreatives(adAccountId: string, connection: MetaConnectionParam): Promise<any[]> {
+  public static async getCreatives(adAccountId: string, connection: MetaConnectionParam): Promise<MetaCreativeRecord[]> {
     const normalizedId = normalizeAdAccountId(adAccountId);
-    let results: any[] = [];
-    const response = await this.requestMetaAPI(`${normalizedId}/adcreatives`, connection, {
+    let results: MetaCreativeRecord[] = [];
+    const response = await this.requestMetaAPI<{ data?: MetaCreativeRecord[] }>(`${normalizedId}/adcreatives`, connection, {
       fields: 'id,name,title,body,image_url,thumbnail_url,video_id,object_story_id,call_to_action_type,object_url',
       limit: '100',
     });
@@ -522,10 +615,10 @@ export class MetaApiService {
     level: 'campaign' | 'adset' | 'ad',
     dateFrom: string,
     dateTo: string
-  ): Promise<any[]> {
+  ): Promise<MetaInsightRecord[]> {
     const normalizedId = normalizeAdAccountId(adAccountId);
-    let results: any[] = [];
-    const response = await this.requestMetaAPI(`${normalizedId}/insights`, connection, {
+    let results: MetaInsightRecord[] = [];
+    const response = await this.requestMetaAPI<{ data?: MetaInsightRecord[] }>(`${normalizedId}/insights`, connection, {
       level,
       time_increment: '1',
       time_range: JSON.stringify({ since: dateFrom, until: dateTo }),

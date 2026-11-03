@@ -1,4 +1,4 @@
-import { calculateMetrics, safeDivide } from './metrics';
+import { calculateMetrics } from './metrics';
 
 export interface AdBenchmarkConfig {
   minTestSpend: number;       // e.g. 1000000 VND
@@ -67,7 +67,7 @@ export interface GeneratedRecommendation {
     cpql?: number | null;
     leadToQlRate?: number;
     qlToWlRate?: number;
-    [key: string]: any;
+    [key: string]: unknown;
   };
 }
 
@@ -90,10 +90,8 @@ export function generateRecommendationForObject(
   });
 
   const { ctr, cpc, cpm, cpl, frequency, leadToQlRate, qlToWlRate, cpql, cpwl } = metrics;
-  const targetCpl = benchmark.goodCpl;
-  const targetCtr = benchmark.ctrBenchmark;
   
-  const evidence: any = {
+  const evidence: GeneratedRecommendation['evidence'] = {
     spend: obj.spend,
     leads: obj.leads,
     cpl: cpl,

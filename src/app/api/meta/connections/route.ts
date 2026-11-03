@@ -51,14 +51,17 @@ export async function POST(request: Request) {
     }
 
     // Get current user ID
-    let userId = null;
+    let userId: string | null = null;
     try {
       const cookieStore = await cookies();
       const sessionCookie = cookieStore.get('session');
       if (sessionCookie && sessionCookie.value) {
-        userId = JSON.parse(sessionCookie.value).id;
+        const parsed = JSON.parse(sessionCookie.value) as { id?: string };
+        userId = parsed.id || null;
       }
-    } catch (_) {}
+    } catch {
+      // Session cookie optional
+    }
 
     if (!userId) {
       const fallbackUser = await prisma.user.findFirst();

@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { generateRecommendationForObject, DEFAULT_BENCHMARK } from '../src/lib/recommendations';
+import { generateRecommendationForObject, DEFAULT_BENCHMARK, ObjectInsights } from '../src/lib/recommendations';
 
 test('TEST recommendation when spend is low', () => {
-  const obj: any = {
+  const obj: ObjectInsights = {
     id: '1',
     name: 'Test Ad',
     type: 'ad',
@@ -22,7 +22,7 @@ test('TEST recommendation when spend is low', () => {
 });
 
 test('SCALE recommendation when metrics are excellent', () => {
-  const obj: any = {
+  const obj: ObjectInsights = {
     id: '2',
     name: 'Awesome Win Ad',
     type: 'ad',
@@ -45,7 +45,7 @@ test('SCALE recommendation when metrics are excellent', () => {
 });
 
 test('CUT recommendation when overspent with poor results', () => {
-  const obj: any = {
+  const obj: ObjectInsights = {
     id: '3',
     name: 'Bad Ad',
     type: 'ad',
@@ -64,7 +64,7 @@ test('CUT recommendation when overspent with poor results', () => {
 });
 
 test('CHECK_LEAD_QUALITY recommendation when conversion is low', () => {
-  const obj: any = {
+  const obj: ObjectInsights = {
     id: '4',
     name: 'High Volume Cheap Lead Ad',
     type: 'ad',

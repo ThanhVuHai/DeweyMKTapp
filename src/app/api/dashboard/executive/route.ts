@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { calculateMetrics, safeDivide } from '@/lib/metrics';
+import { calculateMetrics } from '@/lib/metrics';
+import type { Recommendation } from '@prisma/client';
 
 export async function GET(request: Request) {
   try {
@@ -231,7 +232,7 @@ export async function GET(request: Request) {
       take: 5
     });
 
-    const managementActions = recommendations.map((rec: any) => {
+    const managementActions = recommendations.map((rec: Recommendation) => {
       let impact = 'MEDIUM';
       if (rec.severity === 'high') impact = 'HIGH';
       if (rec.recommendationType === 'CUT') impact = 'HIGH (Save Cost)';
@@ -267,10 +268,11 @@ export async function GET(request: Request) {
       sourceBreakdown,
       managementActions,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Executive API error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { error: 'Internal server error: ' + error.message },
+      { error: 'Internal server error: ' + message },
       { status: 500 }
     );
   }

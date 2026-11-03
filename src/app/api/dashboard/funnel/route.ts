@@ -166,10 +166,11 @@ export async function GET(request: Request) {
       funnelStages,
       diagnostics,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Funnel API error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { error: 'Internal server error: ' + error.message },
+      { error: 'Internal server error: ' + message },
       { status: 500 }
     );
   }

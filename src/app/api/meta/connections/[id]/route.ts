@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { encrypt } from '@/lib/crypto';
 import { cookies } from 'next/headers';
+import type { Prisma } from '@prisma/client';
 
 // PATCH: Update connection details
 export async function PATCH(
@@ -29,7 +30,7 @@ export async function PATCH(
       return NextResponse.json({ error: 'Connection not found' }, { status: 404 });
     }
 
-    const updateData: any = {};
+    const updateData: Prisma.MetaConnectionUpdateInput = {};
     if (connectionName) updateData.connectionName = connectionName;
     if (graphApiVersion) updateData.graphApiVersion = graphApiVersion;
     if (appId !== undefined) updateData.appId = appId;
@@ -53,14 +54,17 @@ export async function PATCH(
     });
 
     // Write audit log
-    let userId = null;
+    let userId: string | null = null;
     try {
       const cookieStore = await cookies();
       const sessionCookie = cookieStore.get('session');
       if (sessionCookie && sessionCookie.value) {
-        userId = JSON.parse(sessionCookie.value).id;
+        const parsed = JSON.parse(sessionCookie.value) as { id?: string };
+        userId = parsed.id || null;
       }
-    } catch (_) {}
+    } catch {
+      // Session cookie optional
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -69,13 +73,14 @@ export async function PATCH(
         entityType: 'META_CONNECTION',
         entityId: id,
         afterJson: JSON.stringify({ connectionName, graphApiVersion, syncFrequency }),
-      }
+      },
     });
 
     return NextResponse.json({ success: true, connection: updated });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Update connection failed:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -86,7 +91,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    
+
     const existingConnection = await prisma.metaConnection.findUnique({
       where: { id },
     });
@@ -100,14 +105,17 @@ export async function DELETE(
     });
 
     // Write audit log
-    let userId = null;
+    let userId: string | null = null;
     try {
       const cookieStore = await cookies();
       const sessionCookie = cookieStore.get('session');
       if (sessionCookie && sessionCookie.value) {
-        userId = JSON.parse(sessionCookie.value).id;
+        const parsed = JSON.parse(sessionCookie.value) as { id?: string };
+        userId = parsed.id || null;
       }
-    } catch (_) {}
+    } catch {
+      // Session cookie optional
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -116,12 +124,13 @@ export async function DELETE(
         entityType: 'META_CONNECTION',
         entityId: id,
         beforeJson: JSON.stringify({ name: existingConnection.connectionName }),
-      }
+      },
     });
 
     return NextResponse.json({ success: true, message: 'Connection removed successfully' });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Delete connection failed:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

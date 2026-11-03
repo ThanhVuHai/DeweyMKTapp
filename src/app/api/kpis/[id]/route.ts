@@ -22,14 +22,17 @@ export async function DELETE(
     });
 
     // Write audit log
-    let userId = null;
+    let userId: string | null = null;
     try {
       const cookieStore = await cookies();
       const sessionCookie = cookieStore.get('session');
       if (sessionCookie && sessionCookie.value) {
-        userId = JSON.parse(sessionCookie.value).id;
+        const parsed = JSON.parse(sessionCookie.value) as { id?: string };
+        userId = parsed.id || null;
       }
-    } catch (_) {}
+    } catch {
+      // Session cookie optional
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -38,12 +41,13 @@ export async function DELETE(
         entityType: 'KPI_TARGET',
         entityId: id,
         beforeJson: JSON.stringify(existingKpi),
-      }
+      },
     });
 
     return NextResponse.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Delete KPI error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

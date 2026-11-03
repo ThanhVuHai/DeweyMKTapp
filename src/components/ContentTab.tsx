@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import { Award, Zap, Compass, PlayCircle, Library, Sparkles, MessageSquare, AlertCircle, CheckCircle, ShieldAlert } from 'lucide-react';
-import { formatVND, formatPercent, formatNumber } from '@/lib/metrics';
+import { Award, Zap, Compass, PlayCircle, Library, Sparkles, MessageSquare, CheckCircle, ShieldAlert } from 'lucide-react';
+import { formatVND, formatPercent } from '@/lib/metrics';
 
 interface ContentTabProps {
   filters: {
@@ -13,11 +13,46 @@ interface ContentTabProps {
   onRefresh: () => void;
 }
 
+interface ContentPerformanceItem {
+  name: string;
+  spend: number;
+  ctr: number;
+  cpl: number;
+  leads: number;
+  ql: number;
+  cpql: number;
+  leadToQlRate: number;
+  status: string;
+}
+
+interface WinFailItem {
+  adId: string;
+  contentId: string;
+  spend: number;
+  leads: number;
+  cpl: number;
+  ctr: number;
+  leadToQlRate: number;
+  rating: string;
+  note?: string;
+}
+
+interface ContentPerformanceResponse {
+  byContent: ContentPerformanceItem[];
+  byFunnel: ContentPerformanceItem[];
+  byAngle: ContentPerformanceItem[];
+  byHookType: ContentPerformanceItem[];
+  byFormat: ContentPerformanceItem[];
+  winFailLibrary: WinFailItem[];
+  textInsights: string[];
+  error?: string;
+}
+
 type LocalTab = 'content' | 'funnel' | 'angle' | 'hook' | 'format' | 'library';
 
 export default function ContentTab({ filters, triggerRefresh, onRefresh }: ContentTabProps) {
   const [activeTab, setActiveTab] = React.useState<LocalTab>('content');
-  const [data, setData] = React.useState<any>(null);
+  const [data, setData] = React.useState<ContentPerformanceResponse | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [updatingId, setUpdatingId] = React.useState<string | null>(null);
@@ -33,15 +68,16 @@ export default function ContentTab({ filters, triggerRefresh, onRefresh }: Conte
         });
 
         const res = await fetch(`/api/dashboard/content-performance?${queryParams.toString()}`);
-        const result = await res.json();
+        const result = (await res.json()) as ContentPerformanceResponse;
         
         if (result.error) {
           setError(result.error);
         } else {
           setData(result);
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to fetch content performance');
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to fetch content performance';
+        setError(message);
       } finally {
         setLoading(false);
       }
@@ -69,8 +105,9 @@ export default function ContentTab({ filters, triggerRefresh, onRefresh }: Conte
       } else {
         alert(result.error || 'Failed to update status');
       }
-    } catch (err: any) {
-      alert('Error: ' + err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      alert('Error: ' + message);
     } finally {
       setUpdatingId(null);
     }
@@ -95,6 +132,10 @@ export default function ContentTab({ filters, triggerRefresh, onRefresh }: Conte
         <span>Lỗi tải phân tích content: {error}</span>
       </div>
     );
+  }
+
+  if (!data) {
+    return null;
   }
 
   const { byContent, byFunnel, byAngle, byHookType, byFormat, winFailLibrary, textInsights } = data;
@@ -194,7 +235,7 @@ export default function ContentTab({ filters, triggerRefresh, onRefresh }: Conte
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/40 text-slate-300">
-                {currentList.map((item: any, idx: number) => (
+                {currentList.map((item: ContentPerformanceItem, idx: number) => (
                   <tr key={idx} className="hover:bg-slate-800/10">
                     <td className="py-4 px-6 font-bold text-slate-200">{item.name}</td>
                     <td className="py-4 px-6 text-right font-medium">{formatVND(item.spend)}</td>
@@ -232,7 +273,7 @@ export default function ContentTab({ filters, triggerRefresh, onRefresh }: Conte
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/40 text-slate-300">
-                {winFailLibrary.map((item: any, idx: number) => (
+                {winFailLibrary.map((item: WinFailItem, idx: number) => (
                   <tr key={idx} className="hover:bg-slate-800/10">
                     <td className="py-4 px-6 font-black text-slate-200">{item.contentId}</td>
                     <td className="py-4 px-6 text-right font-medium">{formatVND(item.spend)}</td>

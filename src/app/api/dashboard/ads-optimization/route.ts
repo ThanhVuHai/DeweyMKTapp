@@ -6,7 +6,8 @@ import { generateRecommendationForObject, DEFAULT_BENCHMARK } from '@/lib/recomm
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const level = searchParams.get('level') || 'campaign'; // campaign, adset, ad
+    const rawLevel = searchParams.get('level') || 'campaign'; // campaign, adset, ad
+    const level: 'campaign' | 'adset' | 'ad' = (rawLevel === 'adset' || rawLevel === 'ad') ? rawLevel : 'campaign';
     const accountId = searchParams.get('accountId') || undefined;
     const dateFromParam = searchParams.get('dateFrom');
     const dateToParam = searchParams.get('dateTo');
@@ -171,7 +172,7 @@ export async function GET(request: Request) {
       const recResult = generateRecommendationForObject({
         id: obj.id,
         name: obj.name,
-        type: level as any,
+        type: level,
         spend: obj.spend,
         impressions: obj.impressions,
         reach: obj.reach,
@@ -231,10 +232,11 @@ export async function GET(request: Request) {
     }
 
     return NextResponse.json({ data: outputList });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Ads Optimization API error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { error: 'Internal server error: ' + error.message },
+      { error: 'Internal server error: ' + message },
       { status: 500 }
     );
   }

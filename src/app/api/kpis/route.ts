@@ -10,13 +10,14 @@ export async function GET() {
         { year: 'desc' },
         { month: 'desc' },
         { campus: 'asc' },
-        { grade: 'asc' }
-      ]
+        { grade: 'asc' },
+      ],
     });
     return NextResponse.json({ kpis });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('List KPIs error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -34,7 +35,7 @@ export async function POST(request: Request) {
       targetQualifiedLeads = 0,
       targetWl = 0,
       targetEnrollments = 0,
-      monthlyBudget = 0
+      monthlyBudget = 0,
     } = body;
 
     if (!month || !year || !campus || !grade || !source) {
@@ -51,8 +52,8 @@ export async function POST(request: Request) {
           year,
           campus,
           grade,
-          source
-        }
+          source,
+        },
       },
       update: {
         targetLeads,
@@ -72,18 +73,21 @@ export async function POST(request: Request) {
         targetWl,
         targetEnrollments,
         monthlyBudget,
-      }
+      },
     });
 
     // Write audit log
-    let userId = null;
+    let userId: string | null = null;
     try {
       const cookieStore = await cookies();
       const sessionCookie = cookieStore.get('session');
       if (sessionCookie && sessionCookie.value) {
-        userId = JSON.parse(sessionCookie.value).id;
+        const parsed = JSON.parse(sessionCookie.value) as { id?: string };
+        userId = parsed.id || null;
       }
-    } catch (_) {}
+    } catch {
+      // Session cookie optional
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -92,12 +96,13 @@ export async function POST(request: Request) {
         entityType: 'KPI_TARGET',
         entityId: kpi.id,
         afterJson: JSON.stringify(body),
-      }
+      },
     });
 
     return NextResponse.json({ success: true, kpi });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Upsert KPI error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

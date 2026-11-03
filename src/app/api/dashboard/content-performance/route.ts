@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { calculateMetrics, safeDivide } from '@/lib/metrics';
+import { calculateMetrics } from '@/lib/metrics';
+import type { ContentMapping, InsightsDaily } from '@prisma/client';
 
 export async function GET(request: Request) {
   try {
@@ -45,7 +46,7 @@ export async function GET(request: Request) {
     });
 
     // Helper functions for grouping
-    const groupInsights = (getKey: (mapping: any, i: any) => string | null) => {
+    const groupInsights = (getKey: (mapping: ContentMapping | undefined, i: Partial<InsightsDaily>) => string | null) => {
       const groupMap = new Map();
 
       insights.forEach(i => {
@@ -83,7 +84,7 @@ export async function GET(request: Request) {
         // Check mapping logic based on grouping keys
         const mapping = ads.find(a => a.adId === lead.adId)?.contentMapping;
         if (mapping) {
-          const groupKey = getKey(mapping, { campaignName: lead.campaignId }); // pass mock-object
+          const groupKey = getKey(mapping, { campaignName: lead.campaignId ?? undefined }); // pass mock-object
           if (groupKey && groupMap.has(groupKey)) {
             const group = groupMap.get(groupKey);
             // Verify if lead matches the specific content mapping
@@ -195,10 +196,11 @@ export async function GET(request: Request) {
       winFailLibrary,
       textInsights,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Content Performance API error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { error: 'Internal server error: ' + error.message },
+      { error: 'Internal server error: ' + message },
       { status: 500 }
     );
   }

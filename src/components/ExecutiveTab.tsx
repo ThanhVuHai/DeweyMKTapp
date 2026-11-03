@@ -1,8 +1,8 @@
 'use client';
 
 import React from 'react';
-import { Target, TrendingUp, AlertOctagon, HelpCircle, Check, X, ShieldAlert, Sparkles } from 'lucide-react';
-import { formatVND, formatPercent, formatNumber, formatVNDFull } from '@/lib/metrics';
+import { Target, Check, X, ShieldAlert, Sparkles } from 'lucide-react';
+import { formatVND, formatPercent, formatVNDFull } from '@/lib/metrics';
 
 interface ExecutiveTabProps {
   filters: {
@@ -14,8 +14,61 @@ interface ExecutiveTabProps {
   onRefresh: () => void;
 }
 
+interface CampusGradeItem {
+  campus: string;
+  grade: string;
+  spend: number;
+  leads: number;
+  cpl: number;
+  ql: number;
+  cpql: number;
+  kpiProgressPct: number;
+  status: string;
+}
+
+interface SourceBreakdownItem {
+  source: string;
+  spend: number;
+  leads: number;
+  cpl: number;
+  ql: number;
+  cpql: number;
+  leadToQlRate: number;
+  qlToWlRate: number;
+}
+
+interface ManagementActionItem {
+  id: string;
+  action: string;
+  reason: string;
+  impact: string;
+  owner: string;
+  status: string;
+}
+
+interface ExecutiveData {
+  kpiProgress: {
+    targetLeads: number;
+    actualLeads: number;
+    achievedLeadsPct: number;
+    forecastLeads: number;
+    gapToTarget: number;
+    requiredDailyLeads: number;
+    targetQL: number;
+    actualQL: number;
+    targetWL: number;
+    actualWL: number;
+    totalBudget: number;
+    spend: number;
+    budgetRemaining: number;
+  };
+  campusGradePerformance: CampusGradeItem[];
+  sourceBreakdown: SourceBreakdownItem[];
+  managementActions: ManagementActionItem[];
+}
+
 export default function ExecutiveTab({ filters, currentRole, triggerRefresh, onRefresh }: ExecutiveTabProps) {
-  const [data, setData] = React.useState<any>(null);
+  const [data, setData] = React.useState<ExecutiveData | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [actioningId, setActioningId] = React.useState<string | null>(null);
@@ -31,15 +84,16 @@ export default function ExecutiveTab({ filters, currentRole, triggerRefresh, onR
         });
 
         const res = await fetch(`/api/dashboard/executive?${queryParams.toString()}`);
-        const result = await res.json();
+        const result = (await res.json()) as ExecutiveData & { error?: string };
         
         if (result.error) {
           setError(result.error);
         } else {
           setData(result);
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to fetch executive data');
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to fetch executive data';
+        setError(message);
       } finally {
         setLoading(false);
       }
@@ -68,8 +122,9 @@ export default function ExecutiveTab({ filters, currentRole, triggerRefresh, onR
       } else {
         alert(result.error || 'Failed to update action');
       }
-    } catch (err: any) {
-      alert('Error: ' + err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      alert('Error: ' + message);
     } finally {
       setActioningId(null);
     }
@@ -94,6 +149,10 @@ export default function ExecutiveTab({ filters, currentRole, triggerRefresh, onR
         <p className="text-sm">{error}</p>
       </div>
     );
+  }
+
+  if (!data) {
+    return null;
   }
 
   const { kpiProgress, campusGradePerformance, sourceBreakdown, managementActions } = data;
@@ -190,7 +249,7 @@ export default function ExecutiveTab({ filters, currentRole, triggerRefresh, onR
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/40 text-slate-300">
-                {campusGradePerformance.map((row: any, idx: number) => (
+                {campusGradePerformance.map((row: CampusGradeItem, idx: number) => (
                   <tr key={idx} className="hover:bg-slate-800/10">
                     <td className="py-3 font-bold text-slate-200">{row.campus}</td>
                     <td className="py-3">{row.grade}</td>
@@ -221,7 +280,7 @@ export default function ExecutiveTab({ filters, currentRole, triggerRefresh, onR
           </div>
 
           <div className="space-y-4">
-            {sourceBreakdown.map((src: any, idx: number) => (
+            {sourceBreakdown.map((src: SourceBreakdownItem, idx: number) => (
               <div key={idx} className="bg-slate-950/40 border border-slate-800/60 p-4 rounded-2xl space-y-3">
                 <div className="flex justify-between items-center">
                   <span className="font-bold text-sm text-slate-200">{src.source}</span>
@@ -264,7 +323,7 @@ export default function ExecutiveTab({ filters, currentRole, triggerRefresh, onR
           </div>
         ) : (
           <div className="space-y-4">
-            {managementActions.map((act: any) => (
+            {managementActions.map((act: ManagementActionItem) => (
               <div key={act.id} className="bg-slate-950/30 border border-slate-800/60 p-5 rounded-2xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                 <div className="space-y-1.5 max-w-[80%]">
                   <div className="flex items-center space-x-2">

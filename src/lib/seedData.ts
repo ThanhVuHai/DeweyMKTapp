@@ -1,25 +1,8 @@
+import { PrismaClient } from '@prisma/client';
 import { encrypt } from './crypto';
 import { safeDivide } from './metrics';
 
-// Types helper for Prisma inside seed
-interface PrismaClient {
-  user: any;
-  metaConnection: any;
-  adAccount: any;
-  campaign: any;
-  adSet: any;
-  ad: any;
-  creative: any;
-  insightsDaily: any;
-  contentMapping: any;
-  kpiTarget: any;
-  crmLead: any;
-  recommendation: any;
-  syncJob: any;
-  auditLog: any;
-}
-
-export async function seedDatabase(prisma: any) {
+export async function seedDatabase(prisma: PrismaClient) {
   // 1. Clean existing database
   await prisma.auditLog.deleteMany({});
   await prisma.recommendation.deleteMany({});
@@ -48,7 +31,7 @@ export async function seedDatabase(prisma: any) {
     }
   });
 
-  const managerUser = await prisma.user.create({
+  await prisma.user.create({
     data: {
       name: 'Marketing Director',
       email: 'manager@adscommand.com',
@@ -165,9 +148,7 @@ export async function seedDatabase(prisma: any) {
   }
 
   // 5. Create AdSets and Ads
-  const adsetsList = [];
   const adsList = [];
-  const creativesList = [];
 
   for (const c of createdCampaigns) {
     // 1 AdSet per campaign
@@ -184,7 +165,6 @@ export async function seedDatabase(prisma: any) {
         effectiveStatus: 'ACTIVE',
       }
     });
-    adsetsList.push(adset);
 
     // 1 Creative per Ad
     const creative = await prisma.creative.create({
@@ -200,7 +180,6 @@ export async function seedDatabase(prisma: any) {
         linkUrl: 'https://dewey.edu.vn/admissions',
       }
     });
-    creativesList.push(creative);
 
     // 1 Ad per AdSet
     const ad = await prisma.ad.create({
@@ -272,9 +251,6 @@ export async function seedDatabase(prisma: any) {
   // 8. Generate Daily Insights and CRM Leads for 30 Days
   const dateCursor = new Date(now);
   dateCursor.setDate(dateCursor.getDate() - 30);
-
-  const insightsRecords = [];
-  const crmLeadsRecords = [];
 
   // Random generator helpers
   const randomInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;

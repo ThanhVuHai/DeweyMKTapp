@@ -1,9 +1,8 @@
 'use client';
 
 import React from 'react';
-import { Search, Download, Sparkles, Filter, ChevronRight, X, MessageSquare, Clipboard, Eye, Play, ShieldAlert, LineChart as ChartIcon } from 'lucide-react';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { formatVND, formatPercent, formatNumber, formatDate, formatVNDFull } from '@/lib/metrics';
+import { Search, Download, Sparkles, ChevronRight, X, MessageSquare, Clipboard, Eye, Play, ShieldAlert, LineChart as ChartIcon } from 'lucide-react';
+import { formatVND, formatPercent } from '@/lib/metrics';
 
 interface OptimizationTabProps {
   filters: {
@@ -17,11 +16,50 @@ interface OptimizationTabProps {
   triggerRefresh: number;
 }
 
+export interface OptimizationItem {
+  id: string;
+  name: string;
+  spend: number;
+  budget: number | null;
+  leads: number;
+  cpl: number | null;
+  ql: number;
+  cpql: number | null;
+  wl: number;
+  cpwl: number | null;
+  impressions: number;
+  reach: number;
+  frequency: number;
+  ctr: number;
+  cpc: number | null;
+  cpm: number;
+  landingPageViews: number;
+  costPerLandingPageView: number | null;
+  trend3Days: number;
+  trend7Days: number;
+  status: string;
+  recommendation: string;
+  recommendationSeverity: string;
+  recommendationReason: string;
+  contentMapping?: {
+    contentId?: string | null;
+    campus?: string | null;
+    grade?: string | null;
+    funnelStage?: string | null;
+    angle?: string | null;
+    format?: string | null;
+    hookType?: string | null;
+    offer?: string | null;
+    note?: string | null;
+  } | null;
+  lastUpdated: string | Date;
+}
+
 type TabLevel = 'campaign' | 'adset' | 'ad';
 
 export default function OptimizationTab({ filters, triggerRefresh }: OptimizationTabProps) {
   const [level, setLevel] = React.useState<TabLevel>('campaign');
-  const [data, setData] = React.useState<any[]>([]);
+  const [data, setData] = React.useState<OptimizationItem[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   
@@ -31,7 +69,7 @@ export default function OptimizationTab({ filters, triggerRefresh }: Optimizatio
   const [selectedFunnel, setSelectedFunnel] = React.useState('');
   
   // Drawer state
-  const [selectedItem, setSelectedItem] = React.useState<any | null>(null);
+  const [selectedItem, setSelectedItem] = React.useState<OptimizationItem | null>(null);
   const [notes, setNotes] = React.useState('');
   const [savingNotes, setSavingNotes] = React.useState(false);
 
@@ -52,15 +90,16 @@ export default function OptimizationTab({ filters, triggerRefresh }: Optimizatio
         });
 
         const res = await fetch(`/api/dashboard/ads-optimization?${queryParams.toString()}`);
-        const result = await res.json();
+        const result = (await res.json()) as { data?: OptimizationItem[]; error?: string };
         
         if (result.error) {
           setError(result.error);
         } else {
           setData(result.data || []);
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to fetch optimization data');
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to fetch optimization data';
+        setError(message);
       } finally {
         setLoading(false);
       }
@@ -68,7 +107,7 @@ export default function OptimizationTab({ filters, triggerRefresh }: Optimizatio
     fetchData();
   }, [level, filters, selectedRecType, selectedFunnel, triggerRefresh]);
 
-  const handleOpenDrawer = (item: any) => {
+  const handleOpenDrawer = (item: OptimizationItem) => {
     setSelectedItem(item);
     setNotes(item.contentMapping?.note || '');
   };
@@ -78,7 +117,7 @@ export default function OptimizationTab({ filters, triggerRefresh }: Optimizatio
     setSavingNotes(true);
     try {
       // Find adId to map content mapping
-      let adId = selectedItem.id;
+      const adId = selectedItem.id;
       if (level !== 'ad') {
         // Fallback for campaign/adset level, find matching ad or create dummy association
         // In real app, contentMapping targets ad level
@@ -96,13 +135,13 @@ export default function OptimizationTab({ filters, triggerRefresh }: Optimizatio
       const result = await res.json();
       if (result.success) {
         // Update local item notes state
-        setSelectedItem((prev: any) => ({
+        setSelectedItem(prev => prev ? {
           ...prev,
           contentMapping: {
-            ...(prev?.contentMapping || {}),
+            ...(prev.contentMapping || {}),
             note: notes,
           }
-        }));
+        } : null);
         // Update list item
         setData(prevData => prevData.map(d => d.id === selectedItem.id ? {
           ...d,
@@ -112,8 +151,9 @@ export default function OptimizationTab({ filters, triggerRefresh }: Optimizatio
       } else {
         alert(result.error || 'Failed to save notes');
       }
-    } catch (err: any) {
-      alert('Error: ' + err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      alert('Error: ' + message);
     } finally {
       setSavingNotes(false);
     }
@@ -131,12 +171,6 @@ export default function OptimizationTab({ filters, triggerRefresh }: Optimizatio
       case 'CHECK_SALES': return 'bg-pink-500/10 text-pink-400 border-pink-500/20';
       default: return 'bg-slate-500/10 text-slate-400 border-slate-500/20';
     }
-  };
-
-  const getSeverityColor = (sev: string) => {
-    if (sev === 'high') return 'text-rose-400';
-    if (sev === 'medium') return 'text-amber-400';
-    return 'text-slate-400';
   };
 
   // Filter list by search key
@@ -157,7 +191,7 @@ export default function OptimizationTab({ filters, triggerRefresh }: Optimizatio
       item.cpl || 'N/A',
       item.ql,
       item.ctr.toFixed(2),
-      item.cpc.toFixed(0),
+      item.cpc !== null ? item.cpc.toFixed(0) : 'N/A',
       item.cpm.toFixed(0),
       item.frequency.toFixed(2),
       item.recommendation,
