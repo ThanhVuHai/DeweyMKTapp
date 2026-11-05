@@ -1,7 +1,8 @@
 import { decrypt } from './crypto';
 
 export interface MetaConnectionParam {
-  encryptedAccessToken: string;
+  encryptedAccessToken?: string;
+  accessToken?: string;
   graphApiVersion?: string;
 }
 
@@ -96,6 +97,40 @@ export interface MetaInsightRecord {
   video_p95_watched_actions?: Array<{ action_type: string; value: string }>;
   video_p100_watched_actions?: Array<{ action_type: string; value: string }>;
   [key: string]: unknown;
+}
+
+export interface MetaPagingCursors {
+  before?: string;
+  after?: string;
+}
+
+export interface MetaPagingInfo {
+  cursors?: MetaPagingCursors;
+  next?: string;
+  previous?: string;
+}
+
+export interface MetaPaginatedResponse<T> {
+  data?: T[];
+  paging?: MetaPagingInfo;
+}
+
+export interface MetaPaginationOptions {
+  limit?: number;
+  maxPages?: number;
+  afterCursor?: string;
+  retryOptions?: {
+    maxRetries?: number;
+    baseDelayMs?: number;
+  };
+}
+
+export interface MetaPaginatedResult<T> {
+  data: T[];
+  pagesFetched: number;
+  totalFetched: number;
+  hasMore: boolean;
+  nextCursor?: string;
 }
 
 interface MetaRawAccount {
@@ -254,6 +289,12 @@ export function parseMetaError(errorData: unknown): MetaApiError {
  * MetaApiService integrates directly with the Meta Marketing API
  */
 export class MetaApiService {
+  public static mockRetryCounter: Record<string, number> = {};
+
+  public static resetMockRetryCounter(): void {
+    MetaApiService.mockRetryCounter = {};
+  }
+
   private static getHeaders() {
     return {
       'Content-Type': 'application/json',
@@ -261,7 +302,7 @@ export class MetaApiService {
   }
 
   public static getDecryptedToken(connection: MetaConnectionParam): string {
-    const rawToken = connection.encryptedAccessToken;
+    const rawToken = connection.accessToken || connection.encryptedAccessToken || '';
     if (rawToken && rawToken.includes(':')) {
       return decrypt(rawToken);
     }
@@ -323,6 +364,111 @@ export class MetaApiService {
   }
 
   /**
+   * Bounded exponential backoff retry for transient network and rate limit errors.
+   */
+  public static async requestMetaAPIWithRetry<T = Record<string, unknown>>(
+    endpoint: string,
+    connection: MetaConnectionParam,
+    params: Record<string, string> = {},
+    options: { maxRetries?: number; baseDelayMs?: number } = {}
+  ): Promise<T> {
+    const maxRetries = options.maxRetries ?? 3;
+    const baseDelayMs = options.baseDelayMs ?? 200;
+    let attempt = 0;
+
+    while (attempt <= maxRetries) {
+      try {
+        return await this.requestMetaAPI<T>(endpoint, connection, params);
+      } catch (error: unknown) {
+        attempt++;
+        if (error instanceof MetaApiError) {
+          const isRetryable =
+            error.category === 'RATE_LIMIT' ||
+            error.category === 'NETWORK_ERROR' ||
+            (error.code !== undefined && [17, 613, 80000, 2].includes(error.code));
+
+          if (!isRetryable || attempt > maxRetries) {
+            throw error;
+          }
+        } else if (attempt > maxRetries) {
+          throw error;
+        }
+
+        // Jittered exponential backoff: 200ms, 400ms, 800ms...
+        const jitter = Math.floor(Math.random() * 50);
+        const delay = baseDelayMs * Math.pow(2, attempt - 1) + jitter;
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    throw new MetaApiError('Max retries exceeded while calling Meta API', {
+      category: 'NETWORK_ERROR',
+      userMessage: 'Gọi Meta API vượt quá số lần thử lại tối đa.',
+    });
+  }
+
+  /**
+   * Cursor-based paginated Meta API fetcher.
+   * Handles forward cursors and respects maxPages / limit constraints.
+   */
+  public static async fetchPaginatedMetaAPI<T>(
+    endpoint: string,
+    connection: MetaConnectionParam,
+    params: Record<string, string> = {},
+    options: MetaPaginationOptions = {}
+  ): Promise<MetaPaginatedResult<T>> {
+    const limit = Math.min(options.limit || 50, 100);
+    const maxPages = Math.min(options.maxPages || 3, 10);
+    let currentCursor = options.afterCursor;
+    let pagesFetched = 0;
+    const allData: T[] = [];
+    let nextCursor: string | undefined = undefined;
+    let hasMore = false;
+
+    while (pagesFetched < maxPages) {
+      const queryParams: Record<string, string> = {
+        ...params,
+        limit: limit.toString(),
+      };
+      if (currentCursor) {
+        queryParams.after = currentCursor;
+      }
+
+      const response = await this.requestMetaAPIWithRetry<MetaPaginatedResponse<T>>(
+        endpoint,
+        connection,
+        queryParams,
+        options.retryOptions
+      );
+
+      const items = response.data || [];
+      allData.push(...items);
+      pagesFetched++;
+
+      const cursorAfter = response.paging?.cursors?.after;
+      const hasNextLink = !!response.paging?.next;
+
+      if (cursorAfter && (hasNextLink || items.length === limit)) {
+        currentCursor = cursorAfter;
+        nextCursor = cursorAfter;
+        hasMore = true;
+      } else {
+        hasMore = false;
+        nextCursor = undefined;
+        break;
+      }
+    }
+
+    return {
+      data: allData,
+      pagesFetched,
+      totalFetched: allData.length,
+      hasMore,
+      nextCursor,
+    };
+  }
+
+  /**
    * Mock request handler for demo tokens and automated testing
    */
   private static handleMockRequest(
@@ -362,6 +508,110 @@ export class MetaApiService {
         category: 'MISSING_BUSINESS_MANAGEMENT',
         userMessage: 'Yêu cầu quyền business_management để đọc thông tin Business Manager. Với tính năng đọc và phân tích quảng cáo cơ bản, hệ thống chỉ cần quyền ads_read.',
       });
+    }
+
+    if (token === 'test-token-rate-limit') {
+      const key = `${endpoint}_${params.limit || ''}`;
+      const attempt = MetaApiService.mockRetryCounter[key] || 0;
+      MetaApiService.mockRetryCounter[key] = attempt + 1;
+      if (attempt === 0) {
+        throw new MetaApiError('Meta API rate limit exceeded on attempt 1', {
+          code: 17,
+          category: 'RATE_LIMIT',
+          userMessage: 'Đã vượt quá giới hạn tần suất gọi Meta API. Vui lòng thử lại sau vài phút.',
+        });
+      }
+      return { id: 'recovered_after_retry', success: true };
+    }
+
+    if (token === 'test-token-pagination') {
+      if (endpoint.endsWith('/campaigns')) {
+        if (params.after === 'cursor_camp_p1') {
+          return {
+            data: [
+              {
+                id: 'c_mock_p2_1',
+                name: 'LINHPT_DEWEYTHT_MESS_TS_021126_MATH',
+                objective: 'OUTCOMES_MESSAGES',
+                status: 'ACTIVE',
+                effective_status: 'ACTIVE',
+              },
+            ],
+            paging: {
+              cursors: {
+                before: 'cursor_camp_p1',
+                after: 'cursor_camp_p2',
+              },
+            },
+          };
+        }
+        return {
+          data: [
+            {
+              id: 'c_mock_p1_1',
+              name: 'NAMNV_DEWEYCG_LEADADS_TS_021126_TIENGANH',
+              objective: 'OUTCOMES_LEADS',
+              status: 'ACTIVE',
+              effective_status: 'ACTIVE',
+            },
+          ],
+          paging: {
+            cursors: {
+              after: 'cursor_camp_p1',
+            },
+            next: `https://graph.facebook.com/v25.0/${endpoint}?after=cursor_camp_p1`,
+          },
+        };
+      }
+    }
+
+    if (token === 'test-token-relationships') {
+      if (endpoint.endsWith('/campaigns')) {
+        return {
+          data: [
+            { id: 'c_rel_1', name: 'NAMNV_DEWEYCG_LEADADS_TS_021126_TIENGANH', objective: 'OUTCOMES_LEADS', status: 'ACTIVE', effective_status: 'ACTIVE' },
+            { id: 'c_rel_2', name: 'LINHPT_DEWEYTHT_MESS_TS_021126_MATH', objective: 'OUTCOMES_MESSAGES', status: 'ACTIVE', effective_status: 'ACTIVE' },
+          ],
+        };
+      }
+
+      if (endpoint.endsWith('/adsets')) {
+        return {
+          data: [
+            { id: 'as_rel_1', campaign_id: 'c_rel_1', name: 'LOOKALIKE_3PCT | 2244 | ALL | RETARGETING', status: 'ACTIVE' },
+            { id: 'as_rel_2', campaign_id: 'c_rel_2', name: 'BROAD | 2545 | FEMALE | PROSPECTING', status: 'ACTIVE' },
+            { id: 'as_orphan', campaign_id: 'c_orphan_999', name: 'ORPHAN_AS | 3050 | ALL | PROSPECTING', status: 'ACTIVE' },
+          ],
+        };
+      }
+
+      if (endpoint.endsWith('/ads')) {
+        return {
+          data: [
+            { id: 'ad_rel_1', campaign_id: 'c_rel_1', adset_id: 'as_rel_1', name: 'C46V46_Video Mastery_Chương trình Mastery', status: 'ACTIVE' },
+            { id: 'ad_rel_2', campaign_id: 'c_rel_2', adset_id: 'as_rel_2', name: 'C41.2D41.2_Adventure KR_Tuyển sinh', status: 'ACTIVE' },
+            { id: 'ad_orphan_adset', campaign_id: 'c_rel_1', adset_id: 'as_orphan_888', name: 'C43D43_TS chung HP_Tuyển sinh', status: 'ACTIVE' },
+            { id: 'ad_orphan_camp', campaign_id: 'c_orphan_999', adset_id: 'as_rel_1', name: 'C44D44_HT Mastery Math_Chương trình Mastery', status: 'ACTIVE' },
+          ],
+        };
+      }
+
+      if (endpoint.includes('insights')) {
+        if (params.level === 'campaign') {
+          return {
+            data: [
+              { campaign_id: 'c_rel_1', campaign_name: 'NAMNV_DEWEYCG_LEADADS_TS_021126_TIENGANH', spend: '2500000', impressions: '50000', clicks: '1200', leads: '18', date_start: '2026-05-15', date_stop: '2026-05-22' },
+              { campaign_id: 'c_rel_2', campaign_name: 'LINHPT_DEWEYTHT_MESS_TS_021126_MATH', spend: '1800000', impressions: '38000', clicks: '950', leads: '10', date_start: '2026-05-15', date_stop: '2026-05-22' },
+            ],
+          };
+        }
+        return {
+          data: [
+            { ad_id: 'ad_rel_1', ad_name: 'C46V46_Video Mastery_Chương trình Mastery', campaign_id: 'c_rel_1', adset_id: 'as_rel_1', spend: '1500000', impressions: '32000', clicks: '800', leads: '12', date_start: '2026-05-15', date_stop: '2026-05-22' },
+            { ad_id: 'ad_rel_2', ad_name: 'C41.2D41.2_Adventure KR_Tuyển sinh', campaign_id: 'c_rel_2', adset_id: 'as_rel_2', spend: '1800000', impressions: '38000', clicks: '950', leads: '10', date_start: '2026-05-15', date_stop: '2026-05-22' },
+          ],
+        };
+      }
     }
 
     if (endpoint === 'me') {
@@ -628,5 +878,79 @@ export class MetaApiService {
     
     if (response.data) results = response.data;
     return results;
+  }
+
+  /**
+   * Fetch list of Campaigns with cursor-based pagination
+   */
+  public static async getCampaignsPaged(
+    adAccountId: string,
+    connection: MetaConnectionParam,
+    options?: MetaPaginationOptions
+  ): Promise<MetaPaginatedResult<MetaCampaignRecord>> {
+    const normalizedId = normalizeAdAccountId(adAccountId);
+    const endpoint = `${normalizedId}/campaigns`;
+    const params: Record<string, string> = {
+      fields: 'id,name,objective,buying_type,status,effective_status,daily_budget,lifetime_budget,start_time,stop_time,created_time,updated_time',
+    };
+
+    return this.fetchPaginatedMetaAPI<MetaCampaignRecord>(endpoint, connection, params, options);
+  }
+
+  /**
+   * Fetch list of Ad Sets with cursor-based pagination
+   */
+  public static async getAdSetsPaged(
+    adAccountId: string,
+    connection: MetaConnectionParam,
+    options?: MetaPaginationOptions
+  ): Promise<MetaPaginatedResult<MetaAdSetRecord>> {
+    const normalizedId = normalizeAdAccountId(adAccountId);
+    const endpoint = `${normalizedId}/adsets`;
+    const params: Record<string, string> = {
+      fields: 'id,campaign_id,name,optimization_goal,billing_event,bid_strategy,daily_budget,lifetime_budget,targeting,status,effective_status,start_time,end_time',
+    };
+
+    return this.fetchPaginatedMetaAPI<MetaAdSetRecord>(endpoint, connection, params, options);
+  }
+
+  /**
+   * Fetch list of Ads with cursor-based pagination
+   */
+  public static async getAdsPaged(
+    adAccountId: string,
+    connection: MetaConnectionParam,
+    options?: MetaPaginationOptions
+  ): Promise<MetaPaginatedResult<MetaAdRecord>> {
+    const normalizedId = normalizeAdAccountId(adAccountId);
+    const endpoint = `${normalizedId}/ads`;
+    const params: Record<string, string> = {
+      fields: 'id,campaign_id,adset_id,name,creative,status,effective_status,created_time,updated_time',
+    };
+
+    return this.fetchPaginatedMetaAPI<MetaAdRecord>(endpoint, connection, params, options);
+  }
+
+  /**
+   * Fetch Insights with cursor-based pagination
+   */
+  public static async getInsightsPaged(
+    adAccountId: string,
+    connection: MetaConnectionParam,
+    level: 'campaign' | 'adset' | 'ad',
+    dateFrom: string,
+    dateTo: string,
+    options?: MetaPaginationOptions
+  ): Promise<MetaPaginatedResult<MetaInsightRecord>> {
+    const normalizedId = normalizeAdAccountId(adAccountId);
+    const endpoint = `${normalizedId}/insights`;
+    const params: Record<string, string> = {
+      level,
+      time_increment: '1',
+      time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
+      fields: 'date_start,date_stop,account_id,account_name,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,clicks,inline_link_clicks,actions,cost_per_action_type,video_3sec_video_view,video_thruplay_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p95_watched_actions,video_p100_watched_actions',
+    };
+
+    return this.fetchPaginatedMetaAPI<MetaInsightRecord>(endpoint, connection, params, options);
   }
 }

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { parseNamingConvention } from '../route';
+import { parseNamingConvention } from '@/lib/namingConvention';
 import { cookies } from 'next/headers';
 
 export async function POST() {
