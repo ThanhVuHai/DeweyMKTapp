@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { verifyAuth } from '@/lib/auth';
 import { MetaApiService, MetaApiError, normalizeAdAccountId } from '@/lib/meta';
 
 // POST: Manually link an Ad Account by ID
@@ -8,6 +9,14 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await verifyAuth(request);
+    if (!auth.authenticated) {
+      return NextResponse.json(
+        { error: 'Chưa đăng nhập. Vui lòng đăng nhập lại.' },
+        { status: 401 }
+      );
+    }
+
     const { id } = await params;
     const body = await request.json();
     const rawAccountId = body.accountId;

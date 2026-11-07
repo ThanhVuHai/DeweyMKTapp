@@ -1,17 +1,10 @@
 import { NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
+import { verifyAuth } from '@/lib/auth';
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const cookieStore = await cookies();
-    const sessionCookie = cookieStore.get('session');
-
-    if (!sessionCookie || !sessionCookie.value) {
-      return NextResponse.json({ user: null });
-    }
-
-    const userData = JSON.parse(sessionCookie.value);
-    return NextResponse.json({ user: userData });
+    const auth = await verifyAuth(request);
+    return NextResponse.json({ user: auth.user });
   } catch (error) {
     console.error('Auth check error:', error);
     return NextResponse.json({ user: null });

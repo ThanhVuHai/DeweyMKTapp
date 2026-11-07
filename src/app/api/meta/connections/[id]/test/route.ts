@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { verifyAuth } from '@/lib/auth';
 import { MetaApiService, MetaApiError } from '@/lib/meta';
 
 export async function POST(
@@ -7,6 +8,14 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await verifyAuth(request);
+    if (!auth.authenticated) {
+      return NextResponse.json(
+        { error: 'Chưa đăng nhập. Vui lòng đăng nhập lại.' },
+        { status: 401 }
+      );
+    }
+
     const { id } = await params;
 
     const connection = await prisma.metaConnection.findUnique({

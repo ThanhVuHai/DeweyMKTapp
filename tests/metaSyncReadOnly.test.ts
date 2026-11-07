@@ -216,3 +216,48 @@ test('Zero Mutation & Security: Token sanitization assertion', async () => {
   // Normalization check
   assert.strictEqual(normalizeAdAccountId('99887766'), 'act_99887766');
 });
+
+test('Single-User Authentication: verifyAuth with Bearer and API key headers', async () => {
+  const { verifyAuth, SINGLE_USER_PASSWORD } = await import('../src/lib/auth');
+
+  // 1. Unauthenticated request without session or headers
+  const reqUnauthenticated = new Request('http://localhost/api/meta/connections/conn_123/inspect', {
+    method: 'POST',
+  });
+  const resUnauthenticated = await verifyAuth(reqUnauthenticated);
+  assert.strictEqual(resUnauthenticated.authenticated, false);
+  assert.strictEqual(resUnauthenticated.user, null);
+
+  // 2. Authenticated request with Bearer token
+  const reqBearer = new Request('http://localhost/api/meta/connections/conn_123/inspect', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${SINGLE_USER_PASSWORD}`,
+    },
+  });
+  const resBearer = await verifyAuth(reqBearer);
+  assert.strictEqual(resBearer.authenticated, true);
+  assert.strictEqual(resBearer.user?.role, 'admin');
+
+  // 3. Authenticated request with x-api-key
+  const reqApiKey = new Request('http://localhost/api/meta/connections/conn_123/inspect', {
+    method: 'POST',
+    headers: {
+      'x-api-key': SINGLE_USER_PASSWORD,
+    },
+  });
+  const resApiKey = await verifyAuth(reqApiKey);
+  assert.strictEqual(resApiKey.authenticated, true);
+  assert.strictEqual(resApiKey.user?.role, 'admin');
+
+  // 4. Invalid Bearer token
+  const reqInvalid = new Request('http://localhost/api/meta/connections/conn_123/inspect', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer wrong-password-456',
+    },
+  });
+  const resInvalid = await verifyAuth(reqInvalid);
+  assert.strictEqual(resInvalid.authenticated, false);
+});
+

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { encrypt } from '@/lib/crypto';
-import { cookies } from 'next/headers';
+import { verifyAuth } from '@/lib/auth';
 import type { Prisma } from '@prisma/client';
 
 // PATCH: Update connection details
@@ -10,6 +10,14 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await verifyAuth(request);
+    if (!auth.authenticated) {
+      return NextResponse.json(
+        { error: 'Chưa đăng nhập. Vui lòng đăng nhập lại.' },
+        { status: 401 }
+      );
+    }
+
     const { id } = await params;
     const body = await request.json();
     const {
@@ -54,17 +62,7 @@ export async function PATCH(
     });
 
     // Write audit log
-    let userId: string | null = null;
-    try {
-      const cookieStore = await cookies();
-      const sessionCookie = cookieStore.get('session');
-      if (sessionCookie && sessionCookie.value) {
-        const parsed = JSON.parse(sessionCookie.value) as { id?: string };
-        userId = parsed.id || null;
-      }
-    } catch {
-      // Session cookie optional
-    }
+    const userId = auth.user?.id && auth.user.id !== 'admin' ? auth.user.id : null;
 
     await prisma.auditLog.create({
       data: {
@@ -90,6 +88,14 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await verifyAuth(request);
+    if (!auth.authenticated) {
+      return NextResponse.json(
+        { error: 'Chưa đăng nhập. Vui lòng đăng nhập lại.' },
+        { status: 401 }
+      );
+    }
+
     const { id } = await params;
 
     const existingConnection = await prisma.metaConnection.findUnique({
@@ -105,17 +111,7 @@ export async function DELETE(
     });
 
     // Write audit log
-    let userId: string | null = null;
-    try {
-      const cookieStore = await cookies();
-      const sessionCookie = cookieStore.get('session');
-      if (sessionCookie && sessionCookie.value) {
-        const parsed = JSON.parse(sessionCookie.value) as { id?: string };
-        userId = parsed.id || null;
-      }
-    } catch {
-      // Session cookie optional
-    }
+    const userId = auth.user?.id && auth.user.id !== 'admin' ? auth.user.id : null;
 
     await prisma.auditLog.create({
       data: {

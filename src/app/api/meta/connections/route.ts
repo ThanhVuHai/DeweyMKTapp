@@ -2,11 +2,19 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { encrypt, maskToken } from '@/lib/crypto';
 import { normalizeAdAccountId, MetaApiService } from '@/lib/meta';
-import { cookies } from 'next/headers';
+import { verifyAuth } from '@/lib/auth';
 
 // GET: List all connections
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const auth = await verifyAuth(request);
+    if (!auth.authenticated) {
+      return NextResponse.json(
+        { error: 'Chưa đăng nhập. Vui lòng đăng nhập lại.' },
+        { status: 401 }
+      );
+    }
+
     const connections = await prisma.metaConnection.findMany({
       orderBy: { createdAt: 'desc' },
       include: {
@@ -31,6 +39,14 @@ export async function GET() {
 // POST: Add a new Meta Connection
 export async function POST(request: Request) {
   try {
+    const auth = await verifyAuth(request);
+    if (!auth.authenticated) {
+      return NextResponse.json(
+        { error: 'Chưa đăng nhập. Vui lòng đăng nhập lại.' },
+        { status: 401 }
+      );
+    }
+
     const body = await request.json();
     const {
       connectionName,
@@ -50,23 +66,7 @@ export async function POST(request: Request) {
       );
     }
 
-    // Get current user ID
-    let userId: string | null = null;
-    try {
-      const cookieStore = await cookies();
-      const sessionCookie = cookieStore.get('session');
-      if (sessionCookie && sessionCookie.value) {
-        const parsed = JSON.parse(sessionCookie.value) as { id?: string };
-        userId = parsed.id || null;
-      }
-    } catch {
-      // Session cookie optional
-    }
-
-    if (!userId) {
-      const fallbackUser = await prisma.user.findFirst();
-      userId = fallbackUser ? fallbackUser.id : 'default-user-id';
-    }
+    const userId = auth.user?.id || 'admin';
 
     // Encrypt security credentials
     const encryptedAccessToken = encrypt(accessToken);
@@ -79,18 +79,18 @@ export async function POST(request: Request) {
         graphApiVersion,
         encryptedAccessToken,
         encryptedAppSecret,
-        appId,
+        appId: appId || null,
         syncStartDate: new Date(syncStartDate),
         syncFrequency,
         status: 'disconnected', // Initially disconnected until verified
       },
     });
 
-    // If user specified an Ad Account ID during creation, verify and link it
-    if (adAccountId && typeof adAccountId === 'string' && adAccountId.trim()) {
-      const normalized = normalizeAdAccountId(adAccountId);
+    // If an initial Ad Account ID was provided, automatically link it
+    if (adAccountId) {
+      const normalizedId = normalizeAdAccountId(adAccountId);
       try {
-        const accountInfo = await MetaApiService.getAdAccount(normalized, {
+        const accountInfo = await MetaApiService.getAdAccount(normalizedId, {
           encryptedAccessToken,
           graphApiVersion,
         });
@@ -98,31 +98,41 @@ export async function POST(request: Request) {
         await prisma.adAccount.create({
           data: {
             metaConnectionId: connection.id,
-            accountId: accountInfo.accountId,
-            accountName: accountInfo.accountName,
-            currency: accountInfo.currency,
-            timezoneName: accountInfo.timezoneName,
+            accountId: normalizedId,
+            accountName: accountInfo.accountName || `Ad Account ${normalizedId}`,
+            currency: accountInfo.currency || 'VND',
+            timezoneName: accountInfo.timezoneName || 'Asia/Ho_Chi_Minh',
             status: accountInfo.status || 'ACTIVE',
           },
         });
-      } catch (accErr) {
-        console.warn('Initial ad account link skipped on create:', (accErr as Error).message);
-        // We still created connection successfully; user can verify or add account later
+      } catch (err) {
+        console.warn('Initial Ad Account link warning:', (err as Error).message);
       }
     }
 
     // Write audit log
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        action: 'CREATE_CONNECTION',
-        entityType: 'META_CONNECTION',
-        entityId: connection.id,
-        afterJson: JSON.stringify({ connectionName, graphApiVersion, syncFrequency, adAccountId }),
+    try {
+      await prisma.auditLog.create({
+        data: {
+          userId: userId && userId !== 'admin' ? userId : null,
+          action: 'CREATE_CONNECTION',
+          entityType: 'MetaConnection',
+          entityId: connection.id,
+          afterJson: JSON.stringify({ connectionName }),
+        },
+      });
+    } catch {
+      // Audit log optional
+    }
+
+    return NextResponse.json({
+      success: true,
+      connection: {
+        ...connection,
+        encryptedAccessToken: maskToken(connection.encryptedAccessToken),
+        encryptedAppSecret: connection.encryptedAppSecret ? '********' : null,
       },
     });
-
-    return NextResponse.json({ success: true, connectionId: connection.id });
   } catch (error: unknown) {
     console.error('Create connection failed:', error);
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });
