@@ -17,10 +17,14 @@ export interface ReadOnlyInspectOptions {
   maxPages?: number;    // max 5, default 2
 }
 
+export type RelationshipStatus = 'RELATIONSHIP_VALID' | 'PARENT_NOT_IN_SAMPLE' | 'ORPHAN_CONFIRMED';
+
 export interface OrphanAdSetItem {
   adsetId: string;
   adsetName: string;
   campaignId: string;
+  status?: RelationshipStatus;
+  reason?: string;
 }
 
 export interface OrphanAdItem {
@@ -28,6 +32,7 @@ export interface OrphanAdItem {
   adName: string;
   adsetId: string;
   campaignId: string;
+  status?: RelationshipStatus;
   reason: string;
 }
 
@@ -36,9 +41,11 @@ export interface RelationshipValidationSummary {
   totalAdSets: number;
   totalAds: number;
   validAdSetToCampaignCount: number;
+  parentNotInSampleAdSetCount: number;
   orphanAdSetCount: number;
   orphanAdSets: OrphanAdSetItem[];
   validAdToAdSetCount: number;
+  parentNotInSampleAdCount: number;
   orphanAdCount: number;
   orphanAds: OrphanAdItem[];
 }
@@ -84,6 +91,7 @@ export interface ReadOnlyInspectResult {
     adLevelSample: MetaInsightRecord[];
     campaignLevelCount: number;
     adLevelCount: number;
+    observedActionTypes?: string[];
   };
   relationshipValidation: RelationshipValidationSummary;
   diagnostics: {
@@ -104,10 +112,12 @@ export class MetaReadOnlySyncService {
   ): Promise<ReadOnlyInspectResult> {
     const startTime = Date.now();
     const warnings: string[] = [];
-    const normalizedAccountId = normalizeAdAccountId(options.adAccountId);
+    const limit = Math.min(options.sampleLimit || 10, 50);
+    const maxPages = Math.min(options.maxPages || 2, 5);
 
+    const normalizedAccountId = normalizeAdAccountId(options.adAccountId);
     if (!normalizedAccountId) {
-      throw new Error('Ad Account ID is required');
+      throw new Error('adAccountId is required and must not be empty');
     }
 
     const decryptedToken = MetaApiService.getDecryptedToken(connection);
@@ -116,47 +126,46 @@ export class MetaReadOnlySyncService {
       decryptedToken === 'mock-token' ||
       decryptedToken.startsWith('test-token-');
 
-    // 1. Inspect Token and Permissions
+    // 1. Validate Token & Permissions
     const tokenInfo = await MetaApiService.getTokenPermissions(connection);
     if (!tokenInfo.hasAdsRead) {
-      warnings.push('Token lacks ads_read permission. Ad data may be incomplete or restricted.');
+      warnings.push("Token lacks 'ads_read' permission. Full ads synchronization will be blocked.");
+    }
+    if (!tokenInfo.hasBusinessManagement) {
+      // Non-blocking notice
+      warnings.push("Token lacks 'business_management' permission. Business Manager profile metadata is bypassed.");
     }
 
-    // 2. Fetch Ad Account Details
+    // 2. Fetch Ad Account Details (uses only ads_read)
     const adAccount = await MetaApiService.getAdAccount(normalizedAccountId, connection);
 
-    const limit = Math.min(Math.max(options.sampleLimit || 10, 1), 50);
-    const maxPages = Math.min(Math.max(options.maxPages || 2, 1), 5);
-
-    // 3. Fetch Campaigns (paged)
+    // 3. Fetch Campaigns (paged sample)
     const campaignsResult = await MetaApiService.getCampaignsPaged(
       normalizedAccountId,
       connection,
       { limit, maxPages }
     );
 
-    // 4. Fetch Ad Sets (paged)
+    // 4. Fetch Ad Sets (paged sample)
     const adsetsResult = await MetaApiService.getAdSetsPaged(
       normalizedAccountId,
       connection,
       { limit, maxPages }
     );
 
-    // 5. Fetch Ads (paged)
+    // 5. Fetch Ads (paged sample)
     const adsResult = await MetaApiService.getAdsPaged(
       normalizedAccountId,
       connection,
       { limit, maxPages }
     );
 
-    // 6. Fetch Sample Insights (both campaign and ad level)
+    // 6. Fetch Sample Insights (Ad level & Campaign level)
     const now = new Date();
-    const defaultDateTo = now.toISOString().split('T')[0];
-    const past7Days = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const defaultDateFrom = past7Days.toISOString().split('T')[0];
-
-    const dateFrom = options.dateFrom || defaultDateFrom;
-    const dateTo = options.dateTo || defaultDateTo;
+    const defaultStart = new Date();
+    defaultStart.setDate(now.getDate() - 7);
+    const dateFrom = options.dateFrom || defaultStart.toISOString().split('T')[0];
+    const dateTo = options.dateTo || now.toISOString().split('T')[0];
 
     let campaignInsights: MetaInsightRecord[] = [];
     let adInsights: MetaInsightRecord[] = [];
@@ -172,7 +181,7 @@ export class MetaReadOnlySyncService {
       );
       campaignInsights = campInsightsRes.data;
     } catch (e: unknown) {
-      warnings.push(`Campaign-level insights query notice: ${(e as Error).message}`);
+      warnings.push(`Could not fetch campaign-level sample insights: ${(e as Error).message}`);
     }
 
     try {
@@ -186,7 +195,7 @@ export class MetaReadOnlySyncService {
       );
       adInsights = adInsightsRes.data;
     } catch (e: unknown) {
-      warnings.push(`Ad-level insights query notice: ${(e as Error).message}`);
+      warnings.push(`Could not fetch ad-level sample insights: ${(e as Error).message}`);
     }
 
     // 7. Validate Parent-Child Relationships
@@ -195,21 +204,32 @@ export class MetaReadOnlySyncService {
 
     const orphanAdSets: OrphanAdSetItem[] = [];
     let validAdSetToCampaignCount = 0;
+    let parentNotInSampleAdSetCount = 0;
 
     for (const adset of adsetsResult.data) {
       if (adset.campaign_id && campaignIdSet.has(adset.campaign_id)) {
         validAdSetToCampaignCount++;
       } else {
+        const isSampleLimited = campaignsResult.hasMore;
+        const status: RelationshipStatus = isSampleLimited ? 'PARENT_NOT_IN_SAMPLE' : 'ORPHAN_CONFIRMED';
+        if (status === 'PARENT_NOT_IN_SAMPLE') {
+          parentNotInSampleAdSetCount++;
+        }
         orphanAdSets.push({
           adsetId: adset.id,
           adsetName: adset.name || 'Unknown AdSet',
           campaignId: adset.campaign_id || '',
+          status,
+          reason: isSampleLimited
+            ? `campaign_id '${adset.campaign_id}' not found in fetched sample (more campaign pages available in account)`
+            : `campaign_id '${adset.campaign_id}' does not exist in any campaign in the account`,
         });
       }
     }
 
     const orphanAds: OrphanAdItem[] = [];
     let validAdToAdSetCount = 0;
+    let parentNotInSampleAdCount = 0;
 
     for (const ad of adsResult.data) {
       const hasParentAdSet = !!(ad.adset_id && adsetIdSet.has(ad.adset_id));
@@ -218,15 +238,33 @@ export class MetaReadOnlySyncService {
       if (hasParentAdSet && hasParentCampaign) {
         validAdToAdSetCount++;
       } else {
+        const isSampleLimited = campaignsResult.hasMore || adsetsResult.hasMore;
+        const status: RelationshipStatus = isSampleLimited ? 'PARENT_NOT_IN_SAMPLE' : 'ORPHAN_CONFIRMED';
+        if (status === 'PARENT_NOT_IN_SAMPLE') {
+          parentNotInSampleAdCount++;
+        }
         const reasons: string[] = [];
-        if (!hasParentAdSet) reasons.push(`adset_id '${ad.adset_id}' not found in fetched adsets`);
-        if (!hasParentCampaign) reasons.push(`campaign_id '${ad.campaign_id}' not found in fetched campaigns`);
+        if (!hasParentAdSet) {
+          reasons.push(
+            adsetsResult.hasMore
+              ? `adset_id '${ad.adset_id}' not found in sample (more adset pages available)`
+              : `adset_id '${ad.adset_id}' confirmed absent from account`
+          );
+        }
+        if (!hasParentCampaign) {
+          reasons.push(
+            campaignsResult.hasMore
+              ? `campaign_id '${ad.campaign_id}' not found in sample (more campaign pages available)`
+              : `campaign_id '${ad.campaign_id}' confirmed absent from account`
+          );
+        }
 
         orphanAds.push({
           adId: ad.id,
           adName: ad.name || 'Unknown Ad',
           adsetId: ad.adset_id || '',
           campaignId: ad.campaign_id || '',
+          status,
           reason: reasons.join('; '),
         });
       }
@@ -239,14 +277,27 @@ export class MetaReadOnlySyncService {
       warnings.push(`Detected ${orphanAds.length} Ad(s) without matching parent AdSet or Campaign in the fetched sample.`);
     }
 
+    // Extract all observed action types across insights
+    const observedActionTypesSet = new Set<string>();
+    for (const ins of [...campaignInsights, ...adInsights]) {
+      if (Array.isArray(ins.actions)) {
+        for (const act of ins.actions) {
+          if (act?.action_type) observedActionTypesSet.add(act.action_type);
+        }
+      }
+    }
+    const observedActionTypes = Array.from(observedActionTypesSet);
+
     const relationshipValidation: RelationshipValidationSummary = {
       totalCampaigns: campaignsResult.data.length,
       totalAdSets: adsetsResult.data.length,
       totalAds: adsResult.data.length,
       validAdSetToCampaignCount,
+      parentNotInSampleAdSetCount,
       orphanAdSetCount: orphanAdSets.length,
       orphanAdSets,
       validAdToAdSetCount,
+      parentNotInSampleAdCount,
       orphanAdCount: orphanAds.length,
       orphanAds,
     };
@@ -294,6 +345,7 @@ export class MetaReadOnlySyncService {
         adLevelSample: adInsights.slice(0, limit),
         campaignLevelCount: campaignInsights.length,
         adLevelCount: adInsights.length,
+        observedActionTypes,
       },
       relationshipValidation,
       diagnostics: {
@@ -304,4 +356,3 @@ export class MetaReadOnlySyncService {
     };
   }
 }
-

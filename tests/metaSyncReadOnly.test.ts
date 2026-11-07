@@ -109,6 +109,7 @@ test('MetaReadOnlySyncService: Validates parent-child relationships and detects 
   assert.strictEqual(rel.orphanAdSetCount, 1);
   assert.strictEqual(rel.orphanAdSets[0].adsetId, 'as_orphan');
   assert.strictEqual(rel.orphanAdSets[0].campaignId, 'c_orphan_999');
+  assert.strictEqual(rel.orphanAdSets[0].status, 'ORPHAN_CONFIRMED');
 
   // Ad to AdSet & Campaign
   assert.strictEqual(rel.validAdToAdSetCount, 2);
@@ -117,6 +118,8 @@ test('MetaReadOnlySyncService: Validates parent-child relationships and detects 
   const orphanCampRef = rel.orphanAds.find(o => o.adId === 'ad_orphan_camp');
   assert.ok(orphanAdSetRef);
   assert.ok(orphanCampRef);
+  assert.strictEqual(orphanAdSetRef.status, 'ORPHAN_CONFIRMED');
+  assert.strictEqual(orphanCampRef.status, 'ORPHAN_CONFIRMED');
 });
 
 test('MetaReadOnlySyncService: Retrieves sample insights at campaign and ad levels', async () => {
@@ -136,6 +139,7 @@ test('MetaReadOnlySyncService: Retrieves sample insights at campaign and ad leve
   assert.strictEqual(result.insights.adLevelCount, 2);
   assert.strictEqual(result.insights.dateRange?.dateFrom, '2026-05-15');
   assert.strictEqual(result.insights.dateRange?.dateTo, '2026-05-22');
+  assert.ok(Array.isArray(result.insights.observedActionTypes));
 
   const camp1 = result.insights.campaignLevelSample[0];
   assert.strictEqual(camp1.campaign_id, 'c_rel_1');
