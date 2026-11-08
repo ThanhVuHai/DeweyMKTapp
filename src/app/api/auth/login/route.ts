@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { SINGLE_USER_PASSWORD, createSingleUserSession } from '@/lib/auth';
+import { SINGLE_USER_PASSWORD, createSingleUserSession, getOrCreateSingleUser } from '@/lib/auth';
 
 export async function POST(request: Request) {
   try {
@@ -15,11 +15,8 @@ export async function POST(request: Request) {
     }
 
     let isValid = password === SINGLE_USER_PASSWORD;
-    let userName = 'Dewey Admin';
-    let userEmail = email || 'admin@dewey.edu.vn';
-    let userId = 'admin';
 
-    // If not matching env password directly, check database single-user record if present
+    // Check database single-user record if present
     if (!isValid && email) {
       try {
         const dbUser = await prisma.user.findUnique({
@@ -27,9 +24,6 @@ export async function POST(request: Request) {
         });
         if (dbUser && dbUser.passwordHash === password) {
           isValid = true;
-          userName = dbUser.name;
-          userEmail = dbUser.email;
-          userId = dbUser.id;
         }
       } catch {
         // Fallback check error
@@ -43,10 +37,13 @@ export async function POST(request: Request) {
       );
     }
 
+    // Resolves or creates a valid persisted user in the database
+    const ownerUser = await getOrCreateSingleUser();
+
     const sessionData = await createSingleUserSession({
-      id: userId,
-      name: userName,
-      email: userEmail,
+      id: ownerUser.id,
+      name: ownerUser.name,
+      email: ownerUser.email,
     });
 
     return NextResponse.json({

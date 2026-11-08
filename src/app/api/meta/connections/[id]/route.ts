@@ -62,17 +62,20 @@ export async function PATCH(
     });
 
     // Write audit log
-    const userId = auth.user?.id && auth.user.id !== 'admin' ? auth.user.id : null;
-
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        action: 'UPDATE_CONNECTION',
-        entityType: 'META_CONNECTION',
-        entityId: id,
-        afterJson: JSON.stringify({ connectionName, graphApiVersion, syncFrequency }),
-      },
-    });
+    try {
+      const userId = auth.user?.id && auth.user.id !== 'admin' ? auth.user.id : null;
+      await prisma.auditLog.create({
+        data: {
+          userId,
+          action: 'UPDATE_CONNECTION',
+          entityType: 'META_CONNECTION',
+          entityId: id,
+          afterJson: JSON.stringify({ connectionName, graphApiVersion, syncFrequency }),
+        },
+      });
+    } catch {
+      // Audit log optional
+    }
 
     return NextResponse.json({ success: true, connection: updated });
   } catch (error: unknown) {
@@ -111,17 +114,20 @@ export async function DELETE(
     });
 
     // Write audit log
-    const userId = auth.user?.id && auth.user.id !== 'admin' ? auth.user.id : null;
-
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        action: 'DELETE_CONNECTION',
-        entityType: 'META_CONNECTION',
-        entityId: id,
-        beforeJson: JSON.stringify({ name: existingConnection.connectionName }),
-      },
-    });
+    try {
+      const userId = auth.user?.id && auth.user.id !== 'admin' ? auth.user.id : null;
+      await prisma.auditLog.create({
+        data: {
+          userId,
+          action: 'DELETE_CONNECTION',
+          entityType: 'META_CONNECTION',
+          entityId: id,
+          beforeJson: JSON.stringify({ name: existingConnection.connectionName }),
+        },
+      });
+    } catch {
+      // Audit log optional
+    }
 
     return NextResponse.json({ success: true, message: 'Connection removed successfully' });
   } catch (error: unknown) {

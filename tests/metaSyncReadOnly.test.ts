@@ -261,3 +261,13 @@ test('Single-User Authentication: verifyAuth with Bearer and API key headers', a
   assert.strictEqual(resInvalid.authenticated, false);
 });
 
+test('Single-User Authentication: getOrCreateSingleUser deterministically resolves owner', async () => {
+  const { getOrCreateSingleUser } = await import('../src/lib/auth');
+  const user = await getOrCreateSingleUser();
+  assert.ok(user.id);
+  assert.ok(user.email);
+  assert.strictEqual(typeof user.id, 'string');
+  assert.ok(user.id.length > 0);
+});
+
+

@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { encrypt, maskToken } from '@/lib/crypto';
 import { normalizeAdAccountId, MetaApiService } from '@/lib/meta';
-import { verifyAuth } from '@/lib/auth';
+import { verifyAuth, getOrCreateSingleUser } from '@/lib/auth';
+import { Prisma } from '@prisma/client';
 
 // GET: List all connections
 export async function GET(request: Request) {
@@ -32,7 +33,8 @@ export async function GET(request: Request) {
     return NextResponse.json({ connections: sanitizedConnections });
   } catch (error: unknown) {
     console.error('List connections failed:', error);
-    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -66,7 +68,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const userId = auth.user?.id || 'admin';
+    // Deterministically resolve or create single-user owner in database
+    // Guarantees MetaConnection.userId points to a valid persisted User record
+    const ownerUser = await getOrCreateSingleUser();
+    const userId = ownerUser.id;
 
     // Encrypt security credentials
     const encryptedAccessToken = encrypt(accessToken);
@@ -114,7 +119,7 @@ export async function POST(request: Request) {
     try {
       await prisma.auditLog.create({
         data: {
-          userId: userId && userId !== 'admin' ? userId : null,
+          userId,
           action: 'CREATE_CONNECTION',
           entityType: 'MetaConnection',
           entityId: connection.id,
@@ -135,6 +140,21 @@ export async function POST(request: Request) {
     });
   } catch (error: unknown) {
     console.error('Create connection failed:', error);
-    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      if (error.code === 'P2003') {
+        return NextResponse.json(
+          { error: 'Không thể tạo kết nối: Lỗi ràng buộc tài khoản sở hữu (Foreign key violation). Vui lòng thử lại.' },
+          { status: 400 }
+        );
+      }
+      if (error.code === 'P2002') {
+        return NextResponse.json(
+          { error: 'Không thể tạo kết nối: Bản ghi đã tồn tại hoặc bị trùng lặp.' },
+          { status: 400 }
+        );
+      }
+    }
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: `Lỗi khi tạo kết nối Meta: ${message}` }, { status: 500 });
   }
 }
