@@ -4,6 +4,7 @@ import {
   MetaApiService,
   MetaApiError,
   normalizeAdAccountId,
+  isMockToken,
 } from '../src/lib/meta';
 import {
   MetaReadOnlySyncService,
@@ -269,5 +270,84 @@ test('Single-User Authentication: getOrCreateSingleUser deterministically resolv
   assert.strictEqual(typeof user.id, 'string');
   assert.ok(user.id.length > 0);
 });
+
+test('Mock / Live Separation: isMockToken strictly identifies mock tokens', () => {
+  assert.strictEqual(isMockToken('mock-token'), true);
+  assert.strictEqual(isMockToken('test-token-demo'), true);
+  assert.strictEqual(isMockToken('EAABwXyzFakeTokenForDemoPurpose123456'), true);
+  // Real live Meta user access tokens must never match mock
+  assert.strictEqual(isMockToken('EAABw0123456789abcdef'), false);
+  assert.strictEqual(isMockToken('EAAGm0PX2z14BA...'), false);
+  assert.strictEqual(isMockToken(''), false);
+});
+
+test('MetaApiService.fetchPaginatedMetaAPI: Throws error on malformed or missing data array', async () => {
+  const invalidConnection = {
+    accessToken: 'test-token-malformed-shape',
+  };
+
+  // Temporarily stub or test handleMockRequest returning non-array
+  await assert.rejects(
+    async () => {
+      // Mock endpoint with invalid shape
+      const metaService = MetaApiService as unknown as { handleMockRequest: (...args: unknown[]) => unknown };
+      const original = metaService.handleMockRequest;
+      metaService.handleMockRequest = () => ({ id: 'act_123', status: 'ACTIVE' }); // No data array
+      try {
+        await MetaApiService.getCampaignsPaged('act_12345', invalidConnection);
+      } finally {
+        metaService.handleMockRequest = original;
+      }
+    },
+    (err: Error) => {
+      assert.ok(err instanceof MetaApiError);
+      assert.ok(err.message.includes('missing data array'));
+      return true;
+    }
+  );
+});
+
+test('MetaReadOnlySyncService: Preserves explicit date range and queries account-level insights', async () => {
+  const mockConnection = {
+    id: 'conn_test_explicit_dates',
+    connectionName: 'Dewey Date Range Test',
+    encryptedAccessToken: encrypt('test-token-demo'),
+    graphApiVersion: 'v25.0',
+  };
+
+  const result: ReadOnlyInspectResult = await MetaReadOnlySyncService.inspectAdAccount(
+    mockConnection,
+    {
+      adAccountId: 'act_1380498158917028',
+      dateFrom: '2026-10-01',
+      dateTo: '2026-10-31',
+      sampleLimit: 10,
+      maxPages: 1,
+    }
+  );
+
+  // Assert explicitly supplied date range is preserved
+  assert.strictEqual(result.insights.dateRange.dateFrom, '2026-10-01');
+  assert.strictEqual(result.insights.dateRange.dateTo, '2026-10-31');
+  assert.strictEqual(result.diagnostics.dateRange.dateFrom, '2026-10-01');
+  assert.strictEqual(result.diagnostics.dateRange.dateTo, '2026-10-31');
+
+  // Assert dataMode is set
+  assert.strictEqual(result.dataMode, 'MOCK');
+  assert.strictEqual(result.isMockData, true);
+
+  // Assert account-level insights summary was queried directly
+  assert.ok(result.insights.accountLevel !== undefined);
+  assert.strictEqual(result.insights.accountLevel?.spend, '293127866');
+
+  // Assert diagnostics do NOT leak token prefix, length, or keys
+  const diagKeys = Object.keys(result.diagnostics);
+  assert.ok(!diagKeys.includes('token'));
+  assert.ok(!diagKeys.includes('tokenPrefix'));
+  assert.ok(!diagKeys.includes('tokenLength'));
+  assert.ok(!diagKeys.includes('secret'));
+  assert.ok(!diagKeys.includes('encryptionKey'));
+});
+
 
 

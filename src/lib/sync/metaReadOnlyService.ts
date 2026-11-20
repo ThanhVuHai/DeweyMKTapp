@@ -7,6 +7,7 @@ import {
   MetaInsightRecord,
   MetaAccountInfo,
   normalizeAdAccountId,
+  isMockToken,
 } from '@/lib/meta';
 
 export interface ReadOnlyInspectOptions {
@@ -51,6 +52,7 @@ export interface RelationshipValidationSummary {
 }
 
 export interface ReadOnlyInspectResult {
+  dataMode: 'LIVE' | 'MOCK';
   isMockData: boolean;
   adAccount: MetaAccountInfo;
   tokenPermissions: {
@@ -61,6 +63,7 @@ export interface ReadOnlyInspectResult {
     userId?: string;
     userName?: string;
   };
+  accountInsightsSummary?: MetaInsightRecord | null;
   campaigns: {
     count: number;
     pagesFetched: number;
@@ -87,6 +90,7 @@ export interface ReadOnlyInspectResult {
       dateFrom: string;
       dateTo: string;
     };
+    accountLevel: MetaInsightRecord | null;
     campaignLevelSample: MetaInsightRecord[];
     adLevelSample: MetaInsightRecord[];
     campaignLevelCount: number;
@@ -95,6 +99,27 @@ export interface ReadOnlyInspectResult {
   };
   relationshipValidation: RelationshipValidationSummary;
   diagnostics: {
+    dataMode: 'LIVE' | 'MOCK';
+    requestedAccountId: string;
+    normalizedAccountId: string;
+    graphApiVersion: string;
+    dateRange: {
+      dateFrom: string;
+      dateTo: string;
+    };
+    rawCounts: {
+      campaigns: number;
+      adsets: number;
+      ads: number;
+      accountInsightsFound: boolean;
+      campaignInsights: number;
+      adInsights: number;
+    };
+    pagination: {
+      campaignsHasMore: boolean;
+      adsetsHasMore: boolean;
+      adsHasMore: boolean;
+    };
     warnings: string[];
     executionTimeMs: number;
     isReadOnly: true;
@@ -121,10 +146,8 @@ export class MetaReadOnlySyncService {
     }
 
     const decryptedToken = MetaApiService.getDecryptedToken(connection);
-    const isMockData =
-      decryptedToken.startsWith('EAABwXyzFake') ||
-      decryptedToken === 'mock-token' ||
-      decryptedToken.startsWith('test-token-');
+    const isMockData = isMockToken(decryptedToken);
+    const dataMode: 'LIVE' | 'MOCK' = isMockData ? 'MOCK' : 'LIVE';
 
     // 1. Validate Token & Permissions
     const tokenInfo = await MetaApiService.getTokenPermissions(connection);
@@ -160,16 +183,29 @@ export class MetaReadOnlySyncService {
       { limit, maxPages }
     );
 
-    // 6. Fetch Sample Insights (Ad level & Campaign level)
+    // 6. Date Range Handling (Explicitly supplied date range preserved; defaults to last 30 days)
     const now = new Date();
-    const defaultStart = new Date();
-    defaultStart.setDate(now.getDate() - 7);
-    const dateFrom = options.dateFrom || defaultStart.toISOString().split('T')[0];
-    const dateTo = options.dateTo || now.toISOString().split('T')[0];
+    const defaultEnd = now.toISOString().split('T')[0];
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const defaultStart = thirtyDaysAgo.toISOString().split('T')[0];
+    const dateFrom = options.dateFrom || defaultStart;
+    const dateTo = options.dateTo || defaultEnd;
 
+    // 6a. Direct Account-level Insights (queried directly BEFORE campaign/ad levels)
+    let accountLevelInsight: MetaInsightRecord | null = null;
+    try {
+      accountLevelInsight = await MetaApiService.getAccountInsights(
+        normalizedAccountId,
+        connection,
+        dateFrom,
+        dateTo
+      );
+    } catch (e: unknown) {
+      warnings.push(`Could not fetch account-level aggregate insights: ${(e as Error).message}`);
+    }
+
+    // 6b. Campaign-level Sample Insights
     let campaignInsights: MetaInsightRecord[] = [];
-    let adInsights: MetaInsightRecord[] = [];
-
     try {
       const campInsightsRes = await MetaApiService.getInsightsPaged(
         normalizedAccountId,
@@ -184,6 +220,8 @@ export class MetaReadOnlySyncService {
       warnings.push(`Could not fetch campaign-level sample insights: ${(e as Error).message}`);
     }
 
+    // 6c. Ad-level Sample Insights
+    let adInsights: MetaInsightRecord[] = [];
     try {
       const adInsightsRes = await MetaApiService.getInsightsPaged(
         normalizedAccountId,
@@ -277,9 +315,14 @@ export class MetaReadOnlySyncService {
       warnings.push(`Detected ${orphanAds.length} Ad(s) without matching parent AdSet or Campaign in the fetched sample.`);
     }
 
-    // Extract all observed action types across insights
+    // Extract all observed action types across all insights (account, campaign, ad)
     const observedActionTypesSet = new Set<string>();
-    for (const ins of [...campaignInsights, ...adInsights]) {
+    const allInsights = [
+      ...(accountLevelInsight ? [accountLevelInsight] : []),
+      ...campaignInsights,
+      ...adInsights,
+    ];
+    for (const ins of allInsights) {
       if (Array.isArray(ins.actions)) {
         for (const act of ins.actions) {
           if (act?.action_type) observedActionTypesSet.add(act.action_type);
@@ -305,6 +348,7 @@ export class MetaReadOnlySyncService {
     const executionTimeMs = Date.now() - startTime;
 
     return {
+      dataMode,
       isMockData,
       adAccount,
       tokenPermissions: {
@@ -315,6 +359,7 @@ export class MetaReadOnlySyncService {
         userId: tokenInfo.userId,
         userName: tokenInfo.userName,
       },
+      accountInsightsSummary: accountLevelInsight,
       campaigns: {
         count: campaignsResult.totalFetched,
         pagesFetched: campaignsResult.pagesFetched,
@@ -341,6 +386,7 @@ export class MetaReadOnlySyncService {
           dateFrom,
           dateTo,
         },
+        accountLevel: accountLevelInsight,
         campaignLevelSample: campaignInsights.slice(0, limit),
         adLevelSample: adInsights.slice(0, limit),
         campaignLevelCount: campaignInsights.length,
@@ -349,6 +395,27 @@ export class MetaReadOnlySyncService {
       },
       relationshipValidation,
       diagnostics: {
+        dataMode,
+        requestedAccountId: options.adAccountId,
+        normalizedAccountId,
+        graphApiVersion: connection.graphApiVersion || 'v25.0',
+        dateRange: {
+          dateFrom,
+          dateTo,
+        },
+        rawCounts: {
+          campaigns: campaignsResult.data.length,
+          adsets: adsetsResult.data.length,
+          ads: adsResult.data.length,
+          accountInsightsFound: !!accountLevelInsight,
+          campaignInsights: campaignInsights.length,
+          adInsights: adInsights.length,
+        },
+        pagination: {
+          campaignsHasMore: campaignsResult.hasMore,
+          adsetsHasMore: adsetsResult.hasMore,
+          adsHasMore: adsResult.hasMore,
+        },
         warnings,
         executionTimeMs,
         isReadOnly: true,

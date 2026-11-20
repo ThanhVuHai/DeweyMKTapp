@@ -192,6 +192,19 @@ export function normalizeAdAccountId(id: string): string {
 }
 
 /**
+ * Strict validator for mock / demo credentials.
+ * Ensures live Meta credentials are NEVER routed through mock handlers.
+ */
+export function isMockToken(token: string): boolean {
+  if (!token) return false;
+  return (
+    token === 'mock-token' ||
+    token.startsWith('test-token-') ||
+    token.startsWith('EAABwXyzFake')
+  );
+}
+
+/**
  * Parses raw Meta Graph API error response into structured MetaApiError
  * with actionable Vietnamese instructions for the user.
  */
@@ -322,11 +335,7 @@ export class MetaApiService {
     const token = this.getDecryptedToken(connection);
 
     // Mock handler for demo tokens & automated test tokens
-    if (
-      token.startsWith('EAABwXyzFake') ||
-      token === 'mock-token' ||
-      token.startsWith('test-token-')
-    ) {
+    if (isMockToken(token)) {
       return this.handleMockRequest(endpoint, params, token) as T;
     }
 
@@ -341,11 +350,17 @@ export class MetaApiService {
       const response = await fetch(url, {
         method: 'GET',
         headers: this.getHeaders(),
+        cache: 'no-store',
       });
 
       const data = await response.json();
 
       if (!response.ok) {
+        throw parseMetaError(data);
+      }
+
+      // Handle edge case where Meta API returns an error object inside HTTP 200
+      if (data && typeof data === 'object' && 'error' in data && (data as { error: unknown }).error) {
         throw parseMetaError(data);
       }
 
@@ -441,7 +456,23 @@ export class MetaApiService {
         options.retryOptions
       );
 
-      const items = response.data || [];
+      // Validate response shape: Must be an object containing a data array
+      if (!response || typeof response !== 'object') {
+        throw new MetaApiError(`Invalid response format from Meta API for endpoint: ${endpoint}`, {
+          category: 'API_ERROR',
+          userMessage: `Định dạng phản hồi không hợp lệ từ Meta API khi truy vấn ${endpoint}.`,
+        });
+      }
+
+      if (!('data' in response) || !Array.isArray(response.data)) {
+        throw new MetaApiError(`Meta API response missing data array for endpoint: ${endpoint}`, {
+          category: 'API_ERROR',
+          userMessage: `Phản hồi từ Meta API cho ${endpoint} không chứa danh sách dữ liệu hợp lệ.`,
+          technicalDetails: JSON.stringify(response).slice(0, 300),
+        });
+      }
+
+      const items = response.data;
       allData.push(...items);
       pagesFetched++;
 
@@ -642,7 +673,7 @@ export class MetaApiService {
       };
     }
 
-    if (endpoint.startsWith('act_')) {
+    if (endpoint.startsWith('act_') && !endpoint.includes('/')) {
       if (params.fields && params.fields.includes('business')) {
         return {
           id: endpoint,
@@ -659,8 +690,93 @@ export class MetaApiService {
       };
     }
 
+    if (endpoint.endsWith('/campaigns')) {
+      return {
+        data: [
+          {
+            id: 'c_mock_demo_1',
+            name: 'NAMNV_DEWEYCG_LEADADS_TS_021126_TIENGANH',
+            objective: 'OUTCOMES_LEADS',
+            status: 'ACTIVE',
+            effective_status: 'ACTIVE',
+            daily_budget: '500000',
+            start_time: '2026-10-01T00:00:00+0700',
+          },
+          {
+            id: 'c_mock_demo_2',
+            name: 'LINHPT_DEWEYTHT_MESS_TS_021126_MATH',
+            objective: 'OUTCOMES_MESSAGES',
+            status: 'ACTIVE',
+            effective_status: 'ACTIVE',
+            daily_budget: '800000',
+            start_time: '2026-10-05T00:00:00+0700',
+          },
+        ],
+      };
+    }
+
+    if (endpoint.endsWith('/adsets')) {
+      return {
+        data: [
+          {
+            id: 'as_mock_demo_1',
+            campaign_id: 'c_mock_demo_1',
+            name: 'LOOKALIKE_3PCT | 2244 | ALL | RETARGETING',
+            status: 'ACTIVE',
+            effective_status: 'ACTIVE',
+          },
+          {
+            id: 'as_mock_demo_2',
+            campaign_id: 'c_mock_demo_2',
+            name: 'BROAD | 2545 | FEMALE | PROSPECTING',
+            status: 'ACTIVE',
+            effective_status: 'ACTIVE',
+          },
+        ],
+      };
+    }
+
+    if (endpoint.endsWith('/ads')) {
+      return {
+        data: [
+          {
+            id: 'ad_mock_demo_1',
+            campaign_id: 'c_mock_demo_1',
+            adset_id: 'as_mock_demo_1',
+            name: 'C46V46_Video Mastery_Chương trình Mastery',
+            status: 'ACTIVE',
+            effective_status: 'ACTIVE',
+          },
+          {
+            id: 'ad_mock_demo_2',
+            campaign_id: 'c_mock_demo_2',
+            adset_id: 'as_mock_demo_2',
+            name: 'C41.2D41.2_Adventure KR_Tuyển sinh',
+            status: 'ACTIVE',
+            effective_status: 'ACTIVE',
+          },
+        ],
+      };
+    }
+
     if (endpoint.includes('insights')) {
-      return { data: [] };
+      const since = params.time_range ? JSON.parse(params.time_range).since : '2026-10-01';
+      const until = params.time_range ? JSON.parse(params.time_range).until : '2026-10-31';
+      return {
+        data: [
+          {
+            account_id: endpoint.split('/')[0].replace('act_', ''),
+            campaign_id: 'c_mock_demo_1',
+            campaign_name: 'NAMNV_DEWEYCG_LEADADS_TS_021126_TIENGANH',
+            spend: '293127866',
+            impressions: '4508895',
+            clicks: '68567',
+            reach: '3200000',
+            date_start: since,
+            date_stop: until,
+          },
+        ],
+      };
     }
 
     return { data: [] };
@@ -937,7 +1053,7 @@ export class MetaApiService {
   public static async getInsightsPaged(
     adAccountId: string,
     connection: MetaConnectionParam,
-    level: 'campaign' | 'adset' | 'ad',
+    level: 'account' | 'campaign' | 'adset' | 'ad',
     dateFrom: string,
     dateTo: string,
     options?: MetaPaginationOptions
@@ -948,9 +1064,35 @@ export class MetaApiService {
       level,
       time_increment: '1',
       time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
-      fields: 'date_start,date_stop,account_id,account_name,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,clicks,inline_link_clicks,actions,cost_per_action_type,video_3sec_video_view,video_thruplay_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p95_watched_actions,video_p100_watched_actions',
+      fields:
+        level === 'account'
+          ? 'date_start,date_stop,account_id,account_name,spend,impressions,reach,clicks,inline_link_clicks,actions,cost_per_action_type'
+          : 'date_start,date_stop,account_id,account_name,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,clicks,inline_link_clicks,actions,cost_per_action_type,video_3sec_video_view,video_thruplay_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p95_watched_actions,video_p100_watched_actions',
     };
 
     return this.fetchPaginatedMetaAPI<MetaInsightRecord>(endpoint, connection, params, options);
+  }
+
+  /**
+   * Fetch Account-level aggregate Insights directly for an Ad Account
+   */
+  public static async getAccountInsights(
+    adAccountId: string,
+    connection: MetaConnectionParam,
+    dateFrom: string,
+    dateTo: string
+  ): Promise<MetaInsightRecord | null> {
+    const normalizedId = normalizeAdAccountId(adAccountId);
+    const endpoint = `${normalizedId}/insights`;
+    const params: Record<string, string> = {
+      level: 'account',
+      time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
+      fields: 'date_start,date_stop,account_id,account_name,spend,impressions,reach,clicks,inline_link_clicks,actions,cost_per_action_type',
+    };
+    const response = await this.requestMetaAPI<{ data?: MetaInsightRecord[] }>(endpoint, connection, params);
+    if (response.data && Array.isArray(response.data) && response.data.length > 0) {
+      return response.data[0];
+    }
+    return null;
   }
 }
