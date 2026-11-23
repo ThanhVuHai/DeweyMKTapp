@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { encrypt, maskToken } from '@/lib/crypto';
-import { normalizeAdAccountId, MetaApiService } from '@/lib/meta';
+import { normalizeAdAccountId, MetaApiService, isMockToken } from '@/lib/meta';
 import { verifyAuth, getOrCreateSingleUser } from '@/lib/auth';
 import { Prisma } from '@prisma/client';
 
@@ -23,12 +23,24 @@ export async function GET(request: Request) {
       },
     });
 
-    // Mask access token for frontend display
-    const sanitizedConnections = connections.map(conn => ({
-      ...conn,
-      encryptedAccessToken: maskToken(conn.encryptedAccessToken),
-      encryptedAppSecret: conn.encryptedAppSecret ? '********' : null,
-    }));
+    // Mask access token for frontend display and compute dataMode
+    const sanitizedConnections = connections.map(conn => {
+      let isMock = false;
+      try {
+        const decrypted = MetaApiService.getDecryptedToken(conn);
+        isMock = isMockToken(decrypted);
+      } catch {
+        isMock = false;
+      }
+
+      return {
+        ...conn,
+        encryptedAccessToken: maskToken(conn.encryptedAccessToken),
+        encryptedAppSecret: conn.encryptedAppSecret ? '********' : null,
+        isMock,
+        dataMode: isMock ? ('MOCK' as const) : ('LIVE' as const),
+      };
+    });
 
     return NextResponse.json({ connections: sanitizedConnections });
   } catch (error: unknown) {

@@ -14,8 +14,13 @@ import {
   Plus,
   Link as LinkIcon,
   Info,
+  Key,
+  Search,
+  X,
+  Calendar,
+  CheckCircle2,
 } from 'lucide-react';
-import { formatDate } from '@/lib/metrics';
+import { formatDate, formatVNDFull } from '@/lib/metrics';
 
 interface ConnectionTabProps {
   currentRole: string;
@@ -44,6 +49,8 @@ interface MetaConnectionItem {
   syncStartDate: string;
   syncFrequency: string;
   adAccounts: AdAccountItem[];
+  isMock?: boolean;
+  dataMode?: 'LIVE' | 'MOCK';
 }
 
 interface DiagnosticDetails {
@@ -87,6 +94,40 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
   const [manualAccountInputs, setManualAccountInputs] = React.useState<Record<string, string>>({});
   const [addingAccountId, setAddingAccountId] = React.useState<string | null>(null);
   const [feedbackMap, setFeedbackMap] = React.useState<Record<string, FeedbackState>>({});
+
+  // Update Token Modal state
+  const [updateTokenConn, setUpdateTokenConn] = React.useState<MetaConnectionItem | null>(null);
+  const [newTokenInput, setNewTokenInput] = React.useState('');
+  const [updatingToken, setUpdatingToken] = React.useState(false);
+  const [updateTokenError, setUpdateTokenError] = React.useState<string | null>(null);
+
+  // Inspect Modal state
+  interface InspectResultData {
+    success: boolean;
+    dataMode: 'LIVE' | 'MOCK';
+    accountId: string;
+    dateRange: { since: string; until: string };
+    accountInsightsSummary?: {
+      spend: number;
+      impressions: number;
+      clicks: number;
+      reach: number;
+    } | null;
+    campaigns?: { count: number; sample: Array<{ id: string; name: string; status: string }> };
+    adsets?: { count: number };
+    ads?: { count: number };
+    error?: string | null;
+  }
+  const [inspectAccount, setInspectAccount] = React.useState<{
+    connectionId: string;
+    accountId: string;
+    accountName: string;
+  } | null>(null);
+  const [inspectDateFrom, setInspectDateFrom] = React.useState('2026-10-01');
+  const [inspectDateTo, setInspectDateTo] = React.useState('2026-10-31');
+  const [inspecting, setInspecting] = React.useState(false);
+  const [inspectResult, setInspectResult] = React.useState<InspectResultData | null>(null);
+  const [inspectError, setInspectError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     async function fetchConnections() {
@@ -153,6 +194,80 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
       alert('Lỗi: ' + (err as Error).message);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleOpenUpdateToken = (conn: MetaConnectionItem) => {
+    setUpdateTokenConn(conn);
+    setNewTokenInput('');
+    setUpdateTokenError(null);
+  };
+
+  const handleSubmitUpdateToken = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!updateTokenConn) return;
+    if (!newTokenInput.trim()) {
+      setUpdateTokenError('Vui lòng nhập Access Token mới!');
+      return;
+    }
+
+    setUpdatingToken(true);
+    setUpdateTokenError(null);
+    try {
+      const res = await fetch(`/api/meta/connections/${updateTokenConn.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessToken: newTokenInput.trim() }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(data.message || 'Cập nhật token thành công!');
+        setUpdateTokenConn(null);
+        setNewTokenInput('');
+        onRefresh();
+      } else {
+        setUpdateTokenError(data.error || 'Cập nhật token thất bại.');
+      }
+    } catch (err: unknown) {
+      setUpdateTokenError((err as Error).message || 'Lỗi mạng khi cập nhật token.');
+    } finally {
+      setUpdatingToken(false);
+    }
+  };
+
+  const handleOpenInspect = (connectionId: string, accountId: string, accountName: string) => {
+    setInspectAccount({ connectionId, accountId, accountName });
+    setInspectResult(null);
+    setInspectError(null);
+  };
+
+  const handleExecuteInspect = async () => {
+    if (!inspectAccount) return;
+    setInspecting(true);
+    setInspectError(null);
+    setInspectResult(null);
+
+    try {
+      const res = await fetch(`/api/meta/connections/${inspectAccount.connectionId}/inspect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accountId: inspectAccount.accountId,
+          dateFrom: inspectDateFrom,
+          dateTo: inspectDateTo,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setInspectResult(data);
+      } else {
+        setInspectError(data.error || 'Soát xét (Inspect) thất bại từ Meta API.');
+      }
+    } catch (err: unknown) {
+      setInspectError((err as Error).message || 'Lỗi mạng khi gọi Inspect API.');
+    } finally {
+      setInspecting(false);
     }
   };
 
@@ -502,6 +617,22 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
                       <div className="flex items-center space-x-2 flex-wrap gap-y-1">
                         <span className="font-bold text-sm text-slate-200">{conn.connectionName}</span>
                         
+                        {/* Data Mode Badge (LIVE vs MOCK) */}
+                        <span
+                          className={`px-2 py-0.5 text-3xs font-extrabold border rounded-full uppercase flex items-center gap-1.5 ${
+                            conn.isMock
+                              ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                              : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                          }`}
+                        >
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full ${
+                              conn.isMock ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'
+                            }`}
+                          />
+                          {conn.isMock ? 'MOCK (Demo)' : 'LIVE (Meta API)'}
+                        </span>
+
                         {/* Token Status Badge */}
                         <span
                           className={`px-2 py-0.5 text-3xs font-extrabold border rounded-full uppercase ${
@@ -537,6 +668,18 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
                     </div>
 
                     <div className="flex space-x-2 shrink-0">
+                      {/* Button Đổi Token */}
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleOpenUpdateToken(conn)}
+                          className="flex items-center space-x-1 px-3 py-1.5 bg-amber-600/15 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 rounded-lg text-3xs font-bold transition-all shadow-md"
+                          title="Cập nhật User Access Token mới từ Meta"
+                        >
+                          <Key className="w-3 h-3 text-amber-400" />
+                          <span>Đổi Token</span>
+                        </button>
+                      )}
+
                       {/* Button Test / Xác thực */}
                       <button
                         onClick={() => handleTestConnection(conn.id)}
@@ -711,11 +854,21 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
                               )}
                             </div>
 
-                            <div className="flex items-center space-x-3">
+                            <div className="flex items-center space-x-2">
                               <div className="text-right text-slate-400">
                                 <span className="font-bold block uppercase">{acc.currency}</span>
                                 <span className="text-slate-500 block text-4xs">{acc.timezoneName}</span>
                               </div>
+
+                              {/* Button Inspect Live Data */}
+                              <button
+                                onClick={() => handleOpenInspect(conn.id, acc.accountId, acc.accountName)}
+                                className="px-2 py-1 bg-indigo-600/20 hover:bg-indigo-600/35 text-indigo-300 border border-indigo-500/30 rounded-lg text-4xs font-bold transition-all flex items-center space-x-1 shrink-0"
+                                title="Soát xét dữ liệu Live Meta Ads (Inspect)"
+                              >
+                                <Search className="w-3 h-3 text-indigo-400" />
+                                <span>Inspect</span>
+                              </button>
 
                               {isAdmin && (
                                 <button
@@ -742,6 +895,289 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
           </div>
         )}
       </div>
+
+      {/* Modal Cập nhật Token (Update Access Token) */}
+      {updateTokenConn && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-lg w-full p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between">
+              <div>
+                <h4 className="text-base font-extrabold text-slate-100 flex items-center gap-2">
+                  <Key className="w-5 h-5 text-amber-400" /> Cập nhật Meta Access Token
+                </h4>
+                <p className="text-xs text-slate-400 mt-1">
+                  Kết nối: <span className="font-bold text-slate-200">{updateTokenConn.connectionName}</span>
+                </p>
+              </div>
+              <button
+                onClick={() => setUpdateTokenConn(null)}
+                className="p-1 text-slate-500 hover:text-slate-300 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitUpdateToken} className="space-y-4">
+              <div>
+                <label className="text-slate-400 text-3xs font-semibold block mb-1.5 uppercase">
+                  Meta User Access Token Mới
+                </label>
+                <textarea
+                  rows={4}
+                  value={newTokenInput}
+                  onChange={e => setNewTokenInput(e.target.value)}
+                  placeholder="Dán mã Meta Access Token (User Token / System User Token) từ Meta Graph API Explorer..."
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-200 text-2xs font-mono focus:outline-none focus:border-indigo-500"
+                />
+                <p className="text-4xs text-slate-500 mt-1">
+                  Hệ thống sẽ ngay lập tức gọi Meta Graph API để xác thực quyền <code className="text-emerald-400">ads_read</code> và mã hóa AES-256 trước khi lưu.
+                </p>
+              </div>
+
+              {updateTokenError && (
+                <div className="p-3 bg-rose-950/30 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                  <span>{updateTokenError}</span>
+                </div>
+              )}
+
+              <div className="flex justify-end space-x-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setUpdateTokenConn(null)}
+                  disabled={updatingToken}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={updatingToken}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow-lg disabled:opacity-50"
+                >
+                  {updatingToken && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                  <span>{updatingToken ? 'Đang xác thực & lưu...' : 'Lưu & Xác thực Token'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Inspect Live Data (Soát xét dữ liệu Live Meta Ads) */}
+      {inspectAccount && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-2xl w-full p-6 space-y-5 shadow-2xl my-8">
+            <div className="flex items-start justify-between border-b border-slate-800/80 pb-4">
+              <div>
+                <div className="flex items-center space-x-2">
+                  <Search className="w-5 h-5 text-indigo-400" />
+                  <h4 className="text-base font-extrabold text-slate-100">
+                    Soát xét dữ liệu trực tiếp (Meta Inspect API)
+                  </h4>
+                </div>
+                <p className="text-xs text-slate-400 mt-1">
+                  Tài khoản: <span className="font-bold text-slate-200">{inspectAccount.accountName}</span> (
+                  <code className="text-indigo-400 font-mono">{inspectAccount.accountId}</code>)
+                </p>
+              </div>
+              <button
+                onClick={() => setInspectAccount(null)}
+                className="p-1 text-slate-500 hover:text-slate-300 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Filter Date Range */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-950/40 p-3.5 rounded-xl border border-slate-850">
+              <div>
+                <label className="text-slate-400 text-3xs font-semibold block mb-1 uppercase flex items-center gap-1">
+                  <Calendar className="w-3 h-3 text-slate-500" /> Từ ngày (Date From)
+                </label>
+                <input
+                  type="date"
+                  value={inspectDateFrom}
+                  onChange={e => setInspectDateFrom(e.target.value)}
+                  className="w-full px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-200 text-2xs focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 text-3xs font-semibold block mb-1 uppercase flex items-center gap-1">
+                  <Calendar className="w-3 h-3 text-slate-500" /> Đến ngày (Date To)
+                </label>
+                <input
+                  type="date"
+                  value={inspectDateTo}
+                  onChange={e => setInspectDateTo(e.target.value)}
+                  className="w-full px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-200 text-2xs focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={handleExecuteInspect}
+                disabled={inspecting}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center space-x-2 shadow-lg"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${inspecting ? 'animate-spin' : ''}`} />
+                <span>{inspecting ? 'Đang truy vấn Meta Graph API...' : 'Chạy Inspect (Soát xét)'}</span>
+              </button>
+            </div>
+
+            {/* Error Banner */}
+            {inspectError && (
+              <div className="p-3.5 bg-rose-950/30 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                <span>{inspectError}</span>
+              </div>
+            )}
+
+            {/* Inspect Result Display */}
+            {inspectResult && (
+              <div className="space-y-4 pt-2">
+                {/* Data Mode Banner */}
+                <div
+                  className={`p-3.5 rounded-xl border flex items-center justify-between ${
+                    inspectResult.dataMode === 'LIVE'
+                      ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
+                      : 'bg-amber-950/30 border-amber-500/40 text-amber-300'
+                  }`}
+                >
+                  <div className="flex items-center space-x-2">
+                    <CheckCircle2 className="w-5 h-5 shrink-0" />
+                    <div>
+                      <span className="font-extrabold text-xs block">
+                        Chế độ dữ liệu: {inspectResult.dataMode === 'LIVE' ? 'LIVE (Dữ liệu Thật từ Meta)' : 'MOCK (Dữ liệu Giả lập)'}
+                      </span>
+                      <span className="text-3xs opacity-80">
+                        Khoảng thời gian: {inspectResult.dateRange?.since} → {inspectResult.dateRange?.until}
+                      </span>
+                    </div>
+                  </div>
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-3xs font-extrabold uppercase border ${
+                      inspectResult.dataMode === 'LIVE'
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                        : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                    }`}
+                  >
+                    {inspectResult.dataMode}
+                  </span>
+                </div>
+
+                {/* Account Insights Summary KPI Cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+                  <div className="bg-slate-950/50 p-3 rounded-xl border border-slate-850">
+                    <span className="text-4xs uppercase tracking-wider text-slate-500 font-bold block mb-1">
+                      Tổng chi tiêu (Spend)
+                    </span>
+                    <span className="text-sm font-extrabold text-indigo-400">
+                      {formatVNDFull(inspectResult.accountInsightsSummary?.spend || 0)}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/50 p-3 rounded-xl border border-slate-850">
+                    <span className="text-4xs uppercase tracking-wider text-slate-500 font-bold block mb-1">
+                      Lượt hiển thị (Impressions)
+                    </span>
+                    <span className="text-sm font-extrabold text-slate-200">
+                      {(inspectResult.accountInsightsSummary?.impressions || 0).toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/50 p-3 rounded-xl border border-slate-850">
+                    <span className="text-4xs uppercase tracking-wider text-slate-500 font-bold block mb-1">
+                      Lượt click (Clicks)
+                    </span>
+                    <span className="text-sm font-extrabold text-slate-200">
+                      {(inspectResult.accountInsightsSummary?.clicks || 0).toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/50 p-3 rounded-xl border border-slate-850">
+                    <span className="text-4xs uppercase tracking-wider text-slate-500 font-bold block mb-1">
+                      Lượt tiếp cận (Reach)
+                    </span>
+                    <span className="text-sm font-extrabold text-slate-200">
+                      {(inspectResult.accountInsightsSummary?.reach || 0).toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Entity Counts */}
+                <div className="grid grid-cols-3 gap-3 text-center">
+                  <div className="bg-slate-950/30 p-2.5 rounded-xl border border-slate-850">
+                    <span className="text-3xs text-slate-400 block">Chiến dịch (Campaigns)</span>
+                    <span className="text-base font-bold text-slate-200">
+                      {inspectResult.campaigns?.count || 0}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/30 p-2.5 rounded-xl border border-slate-850">
+                    <span className="text-3xs text-slate-400 block">Nhóm QC (Ad Sets)</span>
+                    <span className="text-base font-bold text-slate-200">
+                      {inspectResult.adsets?.count || 0}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/30 p-2.5 rounded-xl border border-slate-850">
+                    <span className="text-3xs text-slate-400 block">Mẫu QC (Ads)</span>
+                    <span className="text-base font-bold text-slate-200">
+                      {inspectResult.ads?.count || 0}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Target Account Benchmark Comparison (For GIS Hà Nội act_1380498158917028) */}
+                {inspectAccount.accountId.includes('1380498158917028') && (
+                  <div className="p-3.5 bg-slate-950/60 rounded-xl border border-indigo-500/20 space-y-2">
+                    <span className="text-3xs uppercase font-extrabold text-indigo-300 block tracking-wider">
+                      ★ Đối chiếu chuẩn Meta Graph API Explorer (Tháng 10/2026):
+                    </span>
+                    <div className="grid grid-cols-3 gap-2 text-3xs">
+                      <div>
+                        <span className="text-slate-500 block">Spend Chuẩn:</span>
+                        <span className="font-mono text-emerald-400 font-bold">293.127.866 đ</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">Impressions Chuẩn:</span>
+                        <span className="font-mono text-slate-300 font-bold">4.508.895</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">Clicks Chuẩn:</span>
+                        <span className="font-mono text-slate-300 font-bold">68.567</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Campaign Sample List */}
+                {inspectResult.campaigns?.sample && inspectResult.campaigns.sample.length > 0 && (
+                  <div className="space-y-2">
+                    <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">
+                      Mẫu Chiến dịch ({inspectResult.campaigns.sample.length}):
+                    </span>
+                    <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+                      {inspectResult.campaigns.sample.map(camp => (
+                        <div
+                          key={camp.id}
+                          className="p-2 bg-slate-950/40 border border-slate-850 rounded-lg flex items-center justify-between text-3xs"
+                        >
+                          <div className="truncate mr-2">
+                            <span className="font-semibold text-slate-200 block truncate">{camp.name}</span>
+                            <span className="font-mono text-4xs text-slate-500">{camp.id}</span>
+                          </div>
+                          <span className="px-1.5 py-0.5 bg-slate-800 text-slate-300 rounded text-4xs font-mono uppercase shrink-0">
+                            {camp.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { verifyAuth } from '@/lib/auth';
-import { MetaApiService, MetaApiError } from '@/lib/meta';
+import { MetaApiService, MetaApiError, isMockToken } from '@/lib/meta';
 
 export async function POST(
   request: Request,
@@ -46,13 +46,15 @@ export async function POST(
           },
         });
 
-        const isMock =
-          connection.encryptedAccessToken.includes('Fake') ||
-          connection.encryptedAccessToken.includes('mock-token');
+        const decrypted = MetaApiService.getDecryptedToken(connection);
+        const isMock = isMockToken(decrypted);
 
         return NextResponse.json({
           success: true,
-          message: 'Kết nối và xác thực Token thành công!',
+          dataMode: isMock ? 'MOCK' : 'LIVE',
+          message: isMock
+            ? 'Xác thực Token Demo (Mock Mode) thành công. Để lấy dữ liệu thật, hãy dùng nút Đổi Token.'
+            : 'Xác thực Token Meta Graph API THẬT (Live Mode) thành công!',
           details: {
             userName: tokenInfo.userName || (isMock ? 'Dewey School Demo Manager' : 'Meta Ads User'),
             userId: tokenInfo.userId || 'N/A',
@@ -61,6 +63,8 @@ export async function POST(
             hasBusinessManagement: tokenInfo.hasBusinessManagement,
             linkedAccountsCount: connection.adAccounts.length,
             status: 'connected',
+            isMock,
+            dataMode: isMock ? 'MOCK' : 'LIVE',
           },
         });
       }

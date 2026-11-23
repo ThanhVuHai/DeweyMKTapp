@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { encrypt } from '@/lib/crypto';
+import { encrypt, maskToken } from '@/lib/crypto';
 import { verifyAuth } from '@/lib/auth';
+import { MetaApiService, MetaApiError, isMockToken } from '@/lib/meta';
 import type { Prisma } from '@prisma/client';
 
 // PATCH: Update connection details
@@ -46,8 +47,23 @@ export async function PATCH(
     if (syncFrequency) updateData.syncFrequency = syncFrequency;
 
     if (accessToken) {
+      // 1. Immediately validate replacement token against Meta Graph API
+      const versionToTest = graphApiVersion || existingConnection.graphApiVersion || 'v25.0';
+      const tokenInfo = await MetaApiService.getTokenPermissions({
+        accessToken,
+        graphApiVersion: versionToTest,
+      });
+
+      if (!tokenInfo.valid) {
+        return NextResponse.json(
+          { error: 'Token không hợp lệ hoặc đã hết hạn.' },
+          { status: 400 }
+        );
+      }
+
       updateData.encryptedAccessToken = encrypt(accessToken);
-      updateData.status = 'disconnected'; // reset status to verify new token
+      updateData.status = 'connected';
+      updateData.lastTestedAt = new Date();
     }
 
     if (appSecret) {
@@ -77,8 +93,34 @@ export async function PATCH(
       // Audit log optional
     }
 
-    return NextResponse.json({ success: true, connection: updated });
+    const decrypted = MetaApiService.getDecryptedToken(updated);
+    const isMock = isMockToken(decrypted);
+
+    return NextResponse.json({
+      success: true,
+      message: isMock
+        ? 'Đã cập nhật Token Demo thành công.'
+        : 'Đã cập nhật Token Meta Graph API thật thành công!',
+      dataMode: isMock ? 'MOCK' : 'LIVE',
+      connection: {
+        ...updated,
+        encryptedAccessToken: maskToken(updated.encryptedAccessToken),
+        encryptedAppSecret: updated.encryptedAppSecret ? '********' : null,
+      },
+    });
   } catch (error: unknown) {
+    if (error instanceof MetaApiError) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: error.userMessage || error.message,
+          code: error.code,
+          category: error.category,
+          technicalDetails: error.technicalDetails,
+        },
+        { status: 400 }
+      );
+    }
     console.error('Update connection failed:', error);
     const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json({ error: message }, { status: 500 });
