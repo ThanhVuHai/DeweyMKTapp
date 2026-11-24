@@ -42,6 +42,36 @@ export interface SyncResult {
 // Allowed accounts during initial testing (Strict scope control)
 export const ENABLED_ACCOUNTS_FOR_SYNC = ['act_1380498158917028', '1380498158917028'];
 
+const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Normalizes date string to YYYY-MM-DD format with fallback
+ */
+export function normalizeSyncDate(dateStr: string | undefined | null, fallbackDate: string): string {
+  if (!dateStr || typeof dateStr !== 'string') return fallbackDate;
+  const trimmed = dateStr.trim();
+  if (!DATE_REGEX.test(trimmed)) return fallbackDate;
+  return trimmed;
+}
+
+/**
+ * Concurrently processes an array of items in batches of `batchSize`.
+ * Drastically reduces round-trip network latency to remote databases.
+ */
+export async function batchProcess<T, R = void>(
+  items: T[],
+  batchSize: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const chunk = items.slice(i, i + batchSize);
+    const chunkResults = await Promise.all(chunk.map(worker));
+    results.push(...chunkResults);
+  }
+  return results;
+}
+
 export class MetaSyncEngine {
   /**
    * Synchronizes advertising structure and daily ad-level insights
@@ -102,8 +132,8 @@ export class MetaSyncEngine {
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     const defaultDateFrom = thirtyDaysAgo.toISOString().split('T')[0];
 
-    const dateFrom = options.dateFrom || defaultDateFrom;
-    const dateTo = options.dateTo || defaultDateTo;
+    const dateFrom = normalizeSyncDate(options.dateFrom, defaultDateFrom);
+    const dateTo = normalizeSyncDate(options.dateTo, defaultDateTo);
 
     // 5. Initialize SyncJob Tracking Record
     const syncJob = await prisma.syncJob.create({
@@ -141,7 +171,7 @@ export class MetaSyncEngine {
         },
       });
 
-      // 7. Complete Campaign Pagination & Idempotent Upsert
+      // 7. Complete Campaign Pagination & Idempotent Upsert (Batched)
       const campaignsResult = await MetaApiService.getCampaignsPaged(
         normalizedAccountId,
         connection,
@@ -149,21 +179,20 @@ export class MetaSyncEngine {
       );
       const campaigns = campaignsResult.data;
 
-      for (const c of campaigns) {
-        await prisma.campaign.upsert({
+      const campaignMap = new Map<string, string>();
+      await batchProcess(campaigns, 10, async (c) => {
+        const dbCampaign = await prisma.campaign.upsert({
           where: { campaignId: c.id },
           update: {
             campaignName: c.name || `Campaign ${c.id}`,
             objective: c.objective || null,
-            buyingType: c.buying_type || null,
             status: c.status || 'UNKNOWN',
             effectiveStatus: c.effective_status || c.status || 'UNKNOWN',
+            buyingType: c.buying_type || null,
             dailyBudget: c.daily_budget ? parseFloat(c.daily_budget) : null,
             lifetimeBudget: c.lifetime_budget ? parseFloat(c.lifetime_budget) : null,
             startTime: c.start_time ? new Date(c.start_time) : null,
             endTime: c.stop_time ? new Date(c.stop_time) : null,
-            createdTime: c.created_time ? new Date(c.created_time) : null,
-            updatedTime: c.updated_time ? new Date(c.updated_time) : null,
             rawJson: JSON.stringify(c),
           },
           create: {
@@ -171,29 +200,20 @@ export class MetaSyncEngine {
             campaignId: c.id,
             campaignName: c.name || `Campaign ${c.id}`,
             objective: c.objective || null,
-            buyingType: c.buying_type || null,
             status: c.status || 'UNKNOWN',
             effectiveStatus: c.effective_status || c.status || 'UNKNOWN',
+            buyingType: c.buying_type || null,
             dailyBudget: c.daily_budget ? parseFloat(c.daily_budget) : null,
             lifetimeBudget: c.lifetime_budget ? parseFloat(c.lifetime_budget) : null,
             startTime: c.start_time ? new Date(c.start_time) : null,
             endTime: c.stop_time ? new Date(c.stop_time) : null,
-            createdTime: c.created_time ? new Date(c.created_time) : null,
-            updatedTime: c.updated_time ? new Date(c.updated_time) : null,
             rawJson: JSON.stringify(c),
           },
         });
-      }
-
-      // Map of existing campaign IDs for foreign key lookup
-      const campaignMap = new Map<string, string>();
-      const dbCampaigns = await prisma.campaign.findMany({
-        where: { adAccountId: dbAdAccount.id },
-        select: { id: true, campaignId: true },
+        campaignMap.set(c.id, dbCampaign.id);
       });
-      dbCampaigns.forEach(c => campaignMap.set(c.campaignId, c.id));
 
-      // 8. Complete AdSet Pagination & Idempotent Upsert
+      // 8. Complete AdSet Pagination & Idempotent Upsert (Batched)
       const adsetsResult = await MetaApiService.getAdSetsPaged(
         normalizedAccountId,
         connection,
@@ -201,10 +221,9 @@ export class MetaSyncEngine {
       );
       const adsets = adsetsResult.data;
 
+      // Ensure missing placeholder campaigns exist
       for (const as of adsets) {
-        let parentCampaignDbId = as.campaign_id ? campaignMap.get(as.campaign_id) : undefined;
-        // If parent campaign not yet in DB (e.g. edge case), create placeholder campaign
-        if (!parentCampaignDbId && as.campaign_id) {
+        if (as.campaign_id && !campaignMap.has(as.campaign_id)) {
           const placeholder = await prisma.campaign.create({
             data: {
               adAccountId: dbAdAccount.id,
@@ -214,10 +233,12 @@ export class MetaSyncEngine {
               effectiveStatus: 'UNKNOWN',
             },
           });
-          parentCampaignDbId = placeholder.id;
           campaignMap.set(as.campaign_id, placeholder.id);
         }
+      }
 
+      await batchProcess(adsets, 15, async (as) => {
+        const parentCampaignDbId = as.campaign_id ? campaignMap.get(as.campaign_id) : undefined;
         if (parentCampaignDbId) {
           await prisma.adSet.upsert({
             where: { adsetId: as.id },
@@ -254,7 +275,7 @@ export class MetaSyncEngine {
             },
           });
         }
-      }
+      });
 
       // Map of existing AdSet IDs for foreign key lookup
       const adsetMap = new Map<string, string>();
@@ -264,7 +285,7 @@ export class MetaSyncEngine {
       });
       dbAdSets.forEach(as => adsetMap.set(as.adsetId, as.id));
 
-      // 9. Complete Ad Pagination & Idempotent Upsert
+      // 9. Complete Ad Pagination & Idempotent Upsert (Batched)
       const adsResult = await MetaApiService.getAdsPaged(
         normalizedAccountId,
         connection,
@@ -272,7 +293,7 @@ export class MetaSyncEngine {
       );
       const ads = adsResult.data;
 
-      for (const ad of ads) {
+      await batchProcess(ads, 20, async (ad) => {
         const parentCampaignDbId = ad.campaign_id ? campaignMap.get(ad.campaign_id) : undefined;
         const parentAdSetDbId = ad.adset_id ? adsetMap.get(ad.adset_id) : undefined;
 
@@ -303,9 +324,9 @@ export class MetaSyncEngine {
             },
           });
         }
-      }
+      });
 
-      // 10. Complete Daily Ad-Level Insights Pagination & Idempotent Upsert
+      // 10. Complete Daily Ad-Level Insights Pagination & Idempotent Upsert (Batched)
       const insightsResult = await MetaApiService.getInsightsPaged(
         normalizedAccountId,
         connection,
@@ -320,9 +341,18 @@ export class MetaSyncEngine {
       let totalImpressions = 0;
       let totalClicks = 0;
 
-      for (const insight of dailyInsights) {
-        if (!insight.ad_id || !insight.date_start) continue;
+      // Filter valid insights
+      const validInsights = dailyInsights.filter(insight => insight.ad_id && insight.date_start);
 
+      // Pre-calculate aggregates
+      for (const insight of validInsights) {
+        totalSpend += parseFloat(insight.spend || '0');
+        totalImpressions += parseInt(insight.impressions || '0', 10);
+        totalClicks += parseInt(insight.clicks || '0', 10);
+      }
+
+      // Batch upsert insights into database in chunks of 20
+      await batchProcess(validInsights, 20, async (insight) => {
         const dateObj = new Date(insight.date_start + 'T00:00:00.000Z');
         const spendVal = parseFloat(insight.spend || '0');
         const impVal = parseInt(insight.impressions || '0', 10);
@@ -341,10 +371,6 @@ export class MetaSyncEngine {
           }
         }
 
-        totalSpend += spendVal;
-        totalImpressions += impVal;
-        totalClicks += clicksVal;
-
         const actionsJson = insight.actions ? JSON.stringify(insight.actions) : null;
         const costPerActionTypeJson = insight.cost_per_action_type ? JSON.stringify(insight.cost_per_action_type) : null;
         const breakdownJson = insight.action_values ? JSON.stringify(insight.action_values) : null;
@@ -354,7 +380,7 @@ export class MetaSyncEngine {
             date_level_adId: {
               date: dateObj,
               level: 'ad',
-              adId: insight.ad_id,
+              adId: insight.ad_id!,
             },
           },
           update: {
@@ -385,7 +411,7 @@ export class MetaSyncEngine {
             campaignName: insight.campaign_name || '',
             adsetId: insight.adset_id || '',
             adsetName: insight.adset_name || '',
-            adId: insight.ad_id,
+            adId: insight.ad_id!,
             adName: insight.ad_name || '',
             level: 'ad',
             spend: spendVal,
@@ -404,7 +430,7 @@ export class MetaSyncEngine {
             breakdownJson,
           },
         });
-      }
+      });
 
       // 11. Finalize SyncJob on Success
       await prisma.syncJob.update({
@@ -436,7 +462,7 @@ export class MetaSyncEngine {
           campaignsUpserted: campaigns.length,
           adsetsUpserted: adsets.length,
           adsUpserted: ads.length,
-          insightsUpserted: dailyInsights.length,
+          insightsUpserted: validInsights.length,
         },
         metrics: {
           totalSpend: Math.round(totalSpend),

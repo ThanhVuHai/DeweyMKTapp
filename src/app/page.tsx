@@ -110,22 +110,48 @@ export default function DashboardPage() {
     try {
       const res = await fetch('/api/meta/sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
         body: JSON.stringify({
           adAccountId: syncModalAccount,
           dateFrom: syncModalDateFrom,
           dateTo: syncModalDateTo,
         }),
       });
+
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const rawText = await res.text();
+        const shortText = rawText
+          ? rawText.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim().slice(0, 150)
+          : '';
+        setSyncError(
+          `[HTTP ${res.status}] Máy chủ trả về phản hồi không phải JSON (${res.statusText || 'Lỗi server'}). ` +
+          `${shortText ? `Chi tiết: ${shortText}` : 'Có thể yêu cầu đã quá thời gian xử lý (Gateway Timeout). Vui lòng thử lại.'}`
+        );
+        return;
+      }
+
       const result = await res.json();
       if (res.ok && result.success) {
         setSyncResultData(result.data);
         setTriggerRefresh(prev => prev + 1);
       } else {
-        setSyncError(result.error || 'Đồng bộ dữ liệu Meta thất bại');
+        const errorMsg = result.error || 'Đồng bộ dữ liệu Meta thất bại';
+        const codeInfo = result.errorCode ? `[${result.errorCode}] ` : '';
+        const stageInfo = result.stage ? `(Giai đoạn: ${result.stage}) ` : '';
+        const idInfo = result.correlationId ? `[ID: ${result.correlationId.slice(0, 8)}] ` : '';
+        setSyncError(`${codeInfo}${stageInfo}${idInfo}${errorMsg}`);
       }
     } catch (err: unknown) {
-      setSyncError((err as Error).message || 'Lỗi mạng khi thực hiện đồng bộ');
+      const rawMsg = (err as Error).message || 'Lỗi mạng khi thực hiện đồng bộ';
+      if (rawMsg.includes('The string did not match the expected pattern') || rawMsg.includes('JSON')) {
+        setSyncError('Phản hồi từ máy chủ không đúng định dạng JSON (có thể do Vercel Function timeout hoặc phản hồi HTML). Vui lòng thử lại.');
+      } else {
+        setSyncError(rawMsg);
+      }
     } finally {
       setSyncing(false);
     }

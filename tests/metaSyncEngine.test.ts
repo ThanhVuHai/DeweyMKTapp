@@ -3,9 +3,34 @@ import assert from 'node:assert';
 import {
   MetaSyncEngine,
   ENABLED_ACCOUNTS_FOR_SYNC,
+  normalizeSyncDate,
+  batchProcess,
 } from '../src/lib/sync/metaSyncEngine';
 import { encrypt } from '../src/lib/crypto';
 import { GET as cronHandler, POST as cronPostHandler } from '../src/app/api/cron/sync/route';
+
+test('normalizeSyncDate: Validates and formats dates correctly', () => {
+  const fallback = '2026-10-01';
+  assert.strictEqual(normalizeSyncDate('2026-10-31', fallback), '2026-10-31');
+  assert.strictEqual(normalizeSyncDate('  2026-10-15  ', fallback), '2026-10-15');
+  assert.strictEqual(normalizeSyncDate('invalid-date', fallback), fallback);
+  assert.strictEqual(normalizeSyncDate('', fallback), fallback);
+  assert.strictEqual(normalizeSyncDate(null, fallback), fallback);
+  assert.strictEqual(normalizeSyncDate(undefined, fallback), fallback);
+});
+
+test('batchProcess: Processes array in batches concurrently while maintaining results', async () => {
+  const items = [1, 2, 3, 4, 5, 6, 7];
+  const processed: number[] = [];
+
+  const results = await batchProcess(items, 3, async (num) => {
+    processed.push(num);
+    return num * 2;
+  });
+
+  assert.strictEqual(processed.length, 7);
+  assert.deepStrictEqual(results, [2, 4, 6, 8, 10, 12, 14]);
+});
 
 test('MetaSyncEngine: Rejects accounts outside the enabled scope', async () => {
   const connection = {
