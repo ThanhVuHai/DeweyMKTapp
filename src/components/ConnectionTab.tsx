@@ -208,6 +208,53 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
     }
   };
 
+  // Sync Jobs History & Summary state
+  interface SyncJobItem {
+    id: string;
+    jobType: string;
+    status: string;
+    adAccountId?: string | null;
+    dateFrom?: string | null;
+    dateTo?: string | null;
+    startedAt?: string | null;
+    finishedAt?: string | null;
+    errorMessage?: string | null;
+  }
+  interface SyncSummaryData {
+    targetAccountId: string;
+    lastSuccessfulSync: string | null;
+    persistedCounts: {
+      campaigns: number;
+      adsets: number;
+      ads: number;
+      insightsDaily: number;
+    };
+    persistedMetrics: {
+      totalSpend: number;
+      totalImpressions: number;
+      totalClicks: number;
+    };
+  }
+  const [syncHistory, setSyncHistory] = React.useState<SyncJobItem[]>([]);
+  const [syncSummary, setSyncSummary] = React.useState<SyncSummaryData | null>(null);
+  const [loadingSyncJobs, setLoadingSyncJobs] = React.useState(false);
+
+  const fetchSyncJobs = React.useCallback(async () => {
+    setLoadingSyncJobs(true);
+    try {
+      const res = await fetch('/api/meta/sync/jobs?limit=5');
+      const data = await res.json();
+      if (data.success) {
+        setSyncHistory(data.jobs || []);
+        setSyncSummary(data.summary || null);
+      }
+    } catch {
+      // Ignored
+    } finally {
+      setLoadingSyncJobs(false);
+    }
+  }, []);
+
   React.useEffect(() => {
     async function fetchConnections() {
       setLoading(true);
@@ -227,7 +274,8 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
       }
     }
     fetchConnections();
-  }, [triggerRefresh]);
+    fetchSyncJobs();
+  }, [triggerRefresh, fetchSyncJobs]);
 
   const handleCreateConnection = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1148,6 +1196,128 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
             })}
           </div>
         )}
+
+        {/* Sync Engine & Neon Persistence Summary (Task 2) */}
+        <div className="bg-slate-950/40 border border-slate-850 p-5 rounded-2xl space-y-4">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+            <div>
+              <h4 className="font-extrabold text-sm text-slate-200 flex items-center gap-2">
+                <Database className="w-4 h-4 text-indigo-400" />
+                Đồng bộ Dữ liệu Meta Ads & Lưu trữ Neon PostgreSQL
+              </h4>
+              <p className="text-3xs text-slate-500 mt-0.5">
+                Quản lý tiến trình đồng bộ dữ liệu vào Neon, trạng thái lập lịch hàng ngày và lịch sử thực thi.
+              </p>
+            </div>
+
+            <div className="flex items-center space-x-2 shrink-0">
+              <button
+                type="button"
+                onClick={fetchSyncJobs}
+                disabled={loadingSyncJobs}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg text-3xs font-bold transition-all flex items-center space-x-1"
+              >
+                <RefreshCw className={`w-3 h-3 ${loadingSyncJobs ? 'animate-spin' : ''}`} />
+                <span>Làm mới Lịch sử</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Overview KPI Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-3xs">
+            <div className="bg-slate-900/60 p-3 rounded-xl border border-slate-850 space-y-1">
+              <span className="text-slate-500 font-bold uppercase text-4xs block">Tài khoản Kích hoạt Sync</span>
+              <span className="font-bold text-slate-200 block truncate">GIS Hà Nội</span>
+              <span className="px-1.5 py-0.2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded text-4xs font-bold uppercase inline-block">
+                BẬT (ACTIVE)
+              </span>
+            </div>
+
+            <div className="bg-slate-900/60 p-3 rounded-xl border border-slate-850 space-y-1">
+              <span className="text-slate-500 font-bold uppercase text-4xs block">Lập lịch Tự động (Cron)</span>
+              <span className="font-bold text-slate-200 block">Hàng ngày 09:00 AM</span>
+              <span className="text-slate-500 text-4xs block">02:00 UTC (Vercel Cron)</span>
+            </div>
+
+            <div className="bg-slate-900/60 p-3 rounded-xl border border-slate-850 space-y-1">
+              <span className="text-slate-500 font-bold uppercase text-4xs block">Lần Sync Thành Công</span>
+              <span className="font-bold text-emerald-400 block truncate">
+                {syncSummary?.lastSuccessfulSync ? formatDate(syncSummary.lastSuccessfulSync) : 'Chưa có'}
+              </span>
+              <span className="text-slate-500 text-4xs block">Attribution: 7 ngày</span>
+            </div>
+
+            <div className="bg-slate-900/60 p-3 rounded-xl border border-slate-850 space-y-1">
+              <span className="text-slate-500 font-bold uppercase text-4xs block">Dữ liệu Neon Stored</span>
+              <span className="font-extrabold text-indigo-400 block">
+                {formatVNDFull(syncSummary?.persistedMetrics.totalSpend || 0)}
+              </span>
+              <span className="text-slate-500 text-4xs block">
+                {syncSummary?.persistedCounts.insightsDaily || 0} Daily Insights
+              </span>
+            </div>
+          </div>
+
+          {/* Sync History Table */}
+          <div className="space-y-2 pt-2 border-t border-slate-850">
+            <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">
+              Lịch sử Thực thi Gần nhất (5 Jobs):
+            </span>
+
+            {syncHistory.length === 0 ? (
+              <div className="text-center py-6 border border-dashed border-slate-850 rounded-xl text-slate-500 text-3xs">
+                Chưa có tiến trình đồng bộ nào được ghi nhận. Bấm nút &quot;Sync Now&quot; trên thanh điều hướng để chạy đồng bộ đầu tiên!
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-3xs text-slate-400">
+                  <thead className="bg-slate-900/80 text-4xs text-slate-500 uppercase font-semibold">
+                    <tr>
+                      <th className="p-2">Job ID</th>
+                      <th className="p-2">Loại tác vụ</th>
+                      <th className="p-2">Tài khoản</th>
+                      <th className="p-2">Trạng thái</th>
+                      <th className="p-2">Thời gian</th>
+                      <th className="p-2">Ghi chú / Lỗi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-850">
+                    {syncHistory.map(job => (
+                      <tr key={job.id} className="hover:bg-slate-900/30">
+                        <td className="p-2 font-mono text-4xs text-slate-300">{job.id.slice(0, 8)}</td>
+                        <td className="p-2">
+                          <span className="font-medium text-slate-200">
+                            {job.jobType === 'scheduled_cron' ? 'Lập lịch (Cron)' : 'Thủ công (Manual)'}
+                          </span>
+                        </td>
+                        <td className="p-2 font-mono text-4xs">{job.adAccountId || 'N/A'}</td>
+                        <td className="p-2">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-4xs font-bold uppercase ${
+                              job.status === 'success'
+                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                : job.status === 'running'
+                                ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse'
+                                : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                            }`}
+                          >
+                            {job.status}
+                          </span>
+                        </td>
+                        <td className="p-2 text-4xs font-mono text-slate-500">
+                          {job.startedAt ? formatDate(job.startedAt) : 'N/A'}
+                        </td>
+                        <td className="p-2 text-4xs truncate max-w-xs text-rose-300">
+                          {job.errorMessage || 'Hoàn tất an toàn'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Modal Cập nhật Token (Update Access Token) */}

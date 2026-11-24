@@ -433,7 +433,7 @@ export class MetaApiService {
     options: MetaPaginationOptions = {}
   ): Promise<MetaPaginatedResult<T>> {
     const limit = Math.min(options.limit || 50, 100);
-    const maxPages = Math.min(options.maxPages || 3, 10);
+    const maxPages = Math.min(options.maxPages || 10, 100);
     let currentCursor = options.afterCursor;
     let pagesFetched = 0;
     const allData: T[] = [];

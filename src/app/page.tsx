@@ -4,8 +4,10 @@ import React from 'react';
 import { 
   LayoutDashboard, Target, Activity, BarChart2, Layers, ShieldAlert, 
   Settings, FolderKanban, Users, ClipboardList, RefreshCw, Sparkles,
-  ChevronLeft, ChevronRight, UserCheck, Calendar
+  ChevronLeft, ChevronRight, UserCheck, Calendar, X, CheckCircle2,
+  AlertTriangle, Database
 } from 'lucide-react';
+import { formatVNDFull } from '@/lib/metrics';
 
 // Tabs imports
 import OverviewTab from '@/components/OverviewTab';
@@ -67,6 +69,67 @@ export default function DashboardPage() {
   const [syncing, setSyncing] = React.useState(false);
   const [seeding, setSeeding] = React.useState(false);
   const [accountsList, setAccountsList] = React.useState<AdAccountOption[]>([]);
+
+  // Sync Now Modal state
+  interface SyncResultData {
+    success: boolean;
+    jobId: string;
+    jobType: string;
+    adAccountId: string;
+    accountName: string;
+    dateRange: { since: string; until: string };
+    counts: {
+      campaignsUpserted: number;
+      adsetsUpserted: number;
+      adsUpserted: number;
+      insightsUpserted: number;
+    };
+    metrics: {
+      totalSpend: number;
+      totalImpressions: number;
+      totalClicks: number;
+    };
+    executionTimeMs: number;
+  }
+  const [showSyncModal, setShowSyncModal] = React.useState(false);
+  const [syncModalAccount, setSyncModalAccount] = React.useState('act_1380498158917028');
+  const [syncModalDateFrom, setSyncModalDateFrom] = React.useState('2026-10-01');
+  const [syncModalDateTo, setSyncModalDateTo] = React.useState('2026-10-31');
+  const [syncResultData, setSyncResultData] = React.useState<SyncResultData | null>(null);
+  const [syncError, setSyncError] = React.useState<string | null>(null);
+
+  const handleOpenSyncModal = () => {
+    setShowSyncModal(true);
+    setSyncError(null);
+  };
+
+  const handleExecuteSyncNow = async () => {
+    setSyncing(true);
+    setSyncError(null);
+    setSyncResultData(null);
+    try {
+      const res = await fetch('/api/meta/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adAccountId: syncModalAccount,
+          dateFrom: syncModalDateFrom,
+          dateTo: syncModalDateTo,
+        }),
+      });
+      const result = await res.json();
+      if (res.ok && result.success) {
+        setSyncResultData(result.data);
+        setTriggerRefresh(prev => prev + 1);
+      } else {
+        setSyncError(result.error || 'Đồng bộ dữ liệu Meta thất bại');
+      }
+    } catch (err: unknown) {
+      setSyncError((err as Error).message || 'Lỗi mạng khi thực hiện đồng bộ');
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   // Check auth session on mount
   React.useEffect(() => {
@@ -145,25 +208,6 @@ export default function DashboardPage() {
       await fetch('/api/auth/logout', { method: 'POST' });
     } finally {
       setIsAuthenticated(false);
-    }
-  };
-
-  const handleSyncNow = async () => {
-    setSyncing(true);
-    try {
-      const res = await fetch('/api/recommendations/generate', { method: 'POST' });
-      const result = await res.json();
-      if (result.success) {
-        setTriggerRefresh(prev => prev + 1);
-        alert('Đồng bộ dữ liệu Meta thành công! Đã cập nhật Insights & Đề xuất tối ưu mới.');
-      } else {
-        alert(result.error || 'Sync failed');
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      alert('Error: ' + message);
-    } finally {
-      setSyncing(false);
     }
   };
 
@@ -494,7 +538,7 @@ export default function DashboardPage() {
 
             {/* Sync Now Action */}
             <button
-              onClick={handleSyncNow}
+              onClick={handleOpenSyncModal}
               disabled={syncing}
               className="flex items-center space-x-1.5 px-4.5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-600/15 transition-all"
             >
@@ -519,6 +563,204 @@ export default function DashboardPage() {
         <div className="flex-1 p-8">
           {renderActiveTabContent()}
         </div>
+
+        {/* SYNC NOW MODAL (TASK 2 META SYNC ENGINE) */}
+        {showSyncModal && (
+          <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-xl w-full p-6 space-y-5 shadow-2xl my-8">
+              <div className="flex items-start justify-between border-b border-slate-800/80 pb-4">
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <Database className="w-5 h-5 text-indigo-400" />
+                    <h4 className="text-base font-extrabold text-slate-100">
+                      Đồng bộ Dữ liệu Meta Ads vào Neon PostgreSQL
+                    </h4>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Trích xuất chiến dịch, nhóm quảng cáo, bài quảng cáo và chỉ số Daily Insights trực tiếp từ Meta Marketing API.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowSyncModal(false)}
+                  className="p-1 text-slate-500 hover:text-slate-300 rounded-lg"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Account Selector */}
+              <div className="space-y-1.5">
+                <label className="text-slate-400 text-3xs font-semibold block uppercase">
+                  Tài khoản quảng cáo (Ad Account)
+                </label>
+                <select
+                  value={syncModalAccount}
+                  onChange={e => setSyncModalAccount(e.target.value)}
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-200 text-xs focus:outline-none"
+                >
+                  <option value="act_1380498158917028">
+                    GIS Hà Nội (act_1380498158917028) — [ĐÃ KÍCH HOẠT SYNC]
+                  </option>
+                  {accountsList
+                    .filter(a => a.accountId !== 'act_1380498158917028')
+                    .map(a => (
+                      <option key={a.accountId} value={a.accountId} disabled>
+                        {a.accountName} ({a.accountId}) — [Chưa kích hoạt cho Task 2]
+                      </option>
+                    ))}
+                </select>
+                <p className="text-4xs text-amber-400/90 flex items-center gap-1">
+                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                  Trong giai đoạn nghiệm thu Task 2, chỉ tài khoản GIS Hà Nội được phép đồng bộ để đảm bảo an toàn.
+                </p>
+              </div>
+
+              {/* Date Range Selection & Quick Presets */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-slate-400 text-3xs font-semibold uppercase">
+                    Khoảng thời gian đồng bộ (Date Range)
+                  </label>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSyncModalDateFrom('2026-10-01');
+                        setSyncModalDateTo('2026-10-31');
+                      }}
+                      className="px-2 py-0.5 bg-indigo-600/20 hover:bg-indigo-600/35 text-indigo-300 border border-indigo-500/30 rounded text-4xs font-bold"
+                    >
+                      Tháng 10/2026 (Nghiệm thu)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const now = new Date();
+                        const to = now.toISOString().split('T')[0];
+                        const from = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+                        setSyncModalDateFrom(from);
+                        setSyncModalDateTo(to);
+                      }}
+                      className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded text-4xs font-bold"
+                    >
+                      7 ngày qua
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 bg-slate-950/40 p-3 rounded-xl border border-slate-850">
+                  <div>
+                    <label className="text-slate-500 text-4xs font-semibold block mb-1 uppercase">
+                      Từ ngày (Date From)
+                    </label>
+                    <input
+                      type="date"
+                      value={syncModalDateFrom}
+                      onChange={e => setSyncModalDateFrom(e.target.value)}
+                      className="w-full px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-200 text-xs focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-slate-500 text-4xs font-semibold block mb-1 uppercase">
+                      Đến ngày (Date To)
+                    </label>
+                    <input
+                      type="date"
+                      value={syncModalDateTo}
+                      onChange={e => setSyncModalDateTo(e.target.value)}
+                      className="w-full px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-200 text-xs focus:outline-none"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Action Button */}
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={handleExecuteSyncNow}
+                  disabled={syncing}
+                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center space-x-2 shadow-lg"
+                >
+                  <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+                  <span>{syncing ? 'Đang thực hiện đồng bộ vào Neon...' : 'Bắt đầu Đồng bộ (Execute Sync Now)'}</span>
+                </button>
+              </div>
+
+              {/* Error Message */}
+              {syncError && (
+                <div className="p-3.5 bg-rose-950/30 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                  <span>{syncError}</span>
+                </div>
+              )}
+
+              {/* Sync Result Details */}
+              {syncResultData && (
+                <div className="p-4 bg-slate-950/60 rounded-2xl border border-emerald-500/30 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2 text-emerald-400 font-bold text-xs">
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Đồng bộ thành công! (Job ID: {syncResultData.jobId.slice(0, 8)})</span>
+                    </div>
+                    <span className="text-4xs text-slate-500 font-mono">
+                      {syncResultData.executionTimeMs}ms
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-3xs">
+                    <div className="bg-slate-900/60 p-2 rounded-lg border border-slate-850">
+                      <span className="text-slate-500 block text-4xs uppercase">Chiến dịch</span>
+                      <span className="font-bold text-slate-200 text-xs">
+                        {syncResultData.counts.campaignsUpserted}
+                      </span>
+                    </div>
+                    <div className="bg-slate-900/60 p-2 rounded-lg border border-slate-850">
+                      <span className="text-slate-500 block text-4xs uppercase">Nhóm QC</span>
+                      <span className="font-bold text-slate-200 text-xs">
+                        {syncResultData.counts.adsetsUpserted}
+                      </span>
+                    </div>
+                    <div className="bg-slate-900/60 p-2 rounded-lg border border-slate-850">
+                      <span className="text-slate-500 block text-4xs uppercase">Mẫu QC</span>
+                      <span className="font-bold text-slate-200 text-xs">
+                        {syncResultData.counts.adsUpserted}
+                      </span>
+                    </div>
+                    <div className="bg-slate-900/60 p-2 rounded-lg border border-slate-850">
+                      <span className="text-slate-500 block text-4xs uppercase">Daily Insights</span>
+                      <span className="font-bold text-indigo-400 text-xs">
+                        {syncResultData.counts.insightsUpserted}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Stored Metrics Overview */}
+                  <div className="p-3 bg-slate-900/40 rounded-xl border border-slate-800/80 grid grid-cols-3 gap-2 text-center text-3xs">
+                    <div>
+                      <span className="text-slate-500 block text-4xs uppercase">Tổng Chi Tiêu (Spend)</span>
+                      <span className="font-extrabold text-emerald-400 text-xs">
+                        {formatVNDFull(syncResultData.metrics.totalSpend)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block text-4xs uppercase">Lượt Hiển Thị</span>
+                      <span className="font-bold text-slate-200 text-xs">
+                        {syncResultData.metrics.totalImpressions.toLocaleString()}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block text-4xs uppercase">Lượt Click</span>
+                      <span className="font-bold text-slate-200 text-xs">
+                        {syncResultData.metrics.totalClicks.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
       </main>
     </div>
