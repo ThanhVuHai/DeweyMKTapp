@@ -19,6 +19,11 @@ import {
   X,
   Calendar,
   CheckCircle2,
+  Activity,
+  Server,
+  Database,
+  GitBranch,
+  AlertTriangle,
 } from 'lucide-react';
 import { formatDate, formatVNDFull } from '@/lib/metrics';
 
@@ -128,6 +133,80 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
   const [inspecting, setInspecting] = React.useState(false);
   const [inspectResult, setInspectResult] = React.useState<InspectResultData | null>(null);
   const [inspectError, setInspectError] = React.useState<string | null>(null);
+
+  // Preflight Health Check state
+  interface PreflightData {
+    success: boolean;
+    timestamp: string;
+    environment: {
+      vercelEnv: string;
+      region: string;
+      deploymentUrl: string;
+    };
+    git: {
+      branch: string;
+      commit: string;
+      commitMessage?: string;
+    };
+    database: {
+      connected: boolean;
+      isLocal: boolean;
+      isNeon: boolean;
+      isPooled: boolean;
+      maskedHost: string;
+      databaseName?: string;
+      error?: string;
+    };
+    databaseIsolation: {
+      status: 'PASS' | 'FAIL' | 'NOT_VERIFIED';
+      isIsolated: boolean;
+      actualEndpointId: string;
+      expectedEndpointId: string | null;
+      message: string;
+      reason?: string;
+    };
+    meta: {
+      connectionExists: boolean;
+      connectionName?: string;
+      status?: string;
+      dataMode: 'LIVE' | 'MOCK' | 'UNKNOWN';
+      tokenValid: boolean;
+      hasAdsRead: boolean;
+      hasBusinessManagement: boolean;
+      userName?: string;
+      targetAccountLinked: boolean;
+      targetAccountAccessible: boolean;
+      targetAccountId: string;
+      targetAccountName?: string;
+      error?: string;
+    };
+    task2Readiness: {
+      status: 'READY' | 'BLOCKED';
+      blockers: string[];
+      canExecuteSync: boolean;
+    };
+  }
+  const [preflightData, setPreflightData] = React.useState<PreflightData | null>(null);
+  const [checkingPreflight, setCheckingPreflight] = React.useState(false);
+  const [preflightError, setPreflightError] = React.useState<string | null>(null);
+
+  const handleRunPreflight = async () => {
+    setCheckingPreflight(true);
+    setPreflightError(null);
+    try {
+      const res = await fetch('/api/system/preflight');
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setPreflightData(data);
+      } else {
+        setPreflightError(data.error || 'Kiểm tra tiền kiểm thất bại');
+      }
+    } catch (err: unknown) {
+      setPreflightError((err as Error).message || 'Lỗi mạng khi gọi preflight check');
+    } finally {
+      setCheckingPreflight(false);
+    }
+  };
 
   React.useEffect(() => {
     async function fetchConnections() {
@@ -586,6 +665,181 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
             <ShieldCheck className="w-4.5 h-4.5" /> <span>Lưu kết nối</span>
           </button>
         </form>
+
+        {/* System Health & Task 2 Preflight Section */}
+        <div className="border-t border-slate-850 pt-5 space-y-3.5">
+          <div className="flex items-center justify-between">
+            <h4 className="font-extrabold text-xs text-slate-200 flex items-center gap-1.5 uppercase tracking-wider">
+              <Activity className="w-4 h-4 text-emerald-400" /> Tiền kiểm Hạ tầng & Cách ly DB
+            </h4>
+            <button
+              type="button"
+              onClick={handleRunPreflight}
+              disabled={checkingPreflight}
+              className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-4xs font-bold transition-all flex items-center space-x-1 shadow-sm disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3 h-3 ${checkingPreflight ? 'animate-spin' : ''}`} />
+              <span>{checkingPreflight ? 'Đang kiểm tra...' : 'Run Health Check'}</span>
+            </button>
+          </div>
+
+          <p className="text-4xs text-slate-500 leading-normal">
+            Kiểm tra độc lập branch isolation của Neon PostgreSQL (tránh ghi nhầm Production) và xác thực quyền Meta Marketing API.
+          </p>
+
+          {preflightError && (
+            <div className="p-3 bg-rose-950/30 border border-rose-500/30 rounded-xl text-3xs text-rose-300 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>{preflightError}</span>
+            </div>
+          )}
+
+          {preflightData && (
+            <div className="space-y-3 text-3xs">
+              {/* Overall Task 2 Readiness Badge */}
+              <div
+                className={`p-3 rounded-xl border flex items-start gap-2.5 ${
+                  preflightData.task2Readiness.status === 'READY'
+                    ? 'bg-emerald-950/25 border-emerald-500/35 text-emerald-300'
+                    : 'bg-amber-950/25 border-amber-500/35 text-amber-300'
+                }`}
+              >
+                {preflightData.task2Readiness.status === 'READY' ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400 mt-0.5" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+                )}
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-extrabold uppercase">
+                      Đánh giá Task 2: {preflightData.task2Readiness.status}
+                    </span>
+                    <span
+                      className={`px-1.5 py-0.2 rounded text-4xs font-mono font-bold uppercase ${
+                        preflightData.task2Readiness.status === 'READY'
+                          ? 'bg-emerald-500/20 text-emerald-300'
+                          : 'bg-amber-500/20 text-amber-300'
+                      }`}
+                    >
+                      {preflightData.task2Readiness.canExecuteSync ? 'ĐỦ ĐIỀU KIỆN SYNC' : 'CHƯA ĐỦ ĐIỀU KIỆN'}
+                    </span>
+                  </div>
+                  {preflightData.task2Readiness.blockers.length > 0 && (
+                    <ul className="text-4xs text-slate-400 space-y-0.5 pl-3 list-disc">
+                      {preflightData.task2Readiness.blockers.map((b, idx) => (
+                        <li key={idx} className="text-amber-300/90">{b}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+
+              {/* Detail Metrics Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {/* 1. Môi trường & Git */}
+                <div className="bg-slate-950/40 p-2.5 rounded-xl border border-slate-850 space-y-1">
+                  <span className="text-slate-500 font-bold block uppercase text-4xs flex items-center gap-1">
+                    <Server className="w-3 h-3 text-slate-400" /> Môi trường & Git
+                  </span>
+                  <div className="text-slate-200 font-mono text-4xs space-y-0.5">
+                    <div>Env: <span className="text-indigo-400 font-bold uppercase">{preflightData.environment.vercelEnv}</span> ({preflightData.environment.region})</div>
+                    <div className="truncate flex items-center gap-1">
+                      <GitBranch className="w-2.5 h-2.5 text-slate-500 shrink-0" />
+                      <span className="text-slate-300">{preflightData.git.branch}</span>
+                    </div>
+                    <div>Commit: <span className="text-slate-400 font-bold">{preflightData.git.commit}</span></div>
+                  </div>
+                </div>
+
+                {/* 2. Database Connectivity */}
+                <div className="bg-slate-950/40 p-2.5 rounded-xl border border-slate-850 space-y-1">
+                  <span className="text-slate-500 font-bold block uppercase text-4xs flex items-center gap-1">
+                    <Database className="w-3 h-3 text-slate-400" /> Kết nối Database
+                  </span>
+                  <div className="text-slate-200 font-mono text-4xs space-y-0.5">
+                    <div className="flex items-center gap-1.5">
+                      <span>Trạng thái:</span>
+                      <span className={preflightData.database.connected ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                        {preflightData.database.connected ? '✓ Đã kết nối' : '✗ Thất bại'}
+                      </span>
+                    </div>
+                    <div className="truncate text-slate-400" title={preflightData.database.maskedHost}>
+                      Host: {preflightData.database.maskedHost}
+                    </div>
+                    {preflightData.database.databaseName && (
+                      <div className="text-slate-500">DB: {preflightData.database.databaseName}</div>
+                    )}
+                  </div>
+                </div>
+
+                {/* 3. Database Branch Isolation */}
+                <div className="bg-slate-950/40 p-2.5 rounded-xl border border-slate-850 space-y-1 sm:col-span-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500 font-bold uppercase text-4xs flex items-center gap-1">
+                      <ShieldCheck className="w-3 h-3 text-indigo-400" /> Cách ly Database (Neon Branch)
+                    </span>
+                    <span
+                      className={`px-1.5 py-0.2 rounded text-4xs font-bold uppercase border ${
+                        preflightData.databaseIsolation.status === 'PASS'
+                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                          : preflightData.databaseIsolation.status === 'FAIL'
+                          ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                          : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                      }`}
+                    >
+                      {preflightData.databaseIsolation.status}
+                    </span>
+                  </div>
+                  <p className="text-4xs text-slate-400 leading-normal">
+                    {preflightData.databaseIsolation.message}
+                  </p>
+                  <div className="grid grid-cols-2 gap-2 text-4xs font-mono text-slate-400 pt-1 border-t border-slate-850/60">
+                    <div>
+                      <span className="text-slate-500 block">Actual Endpoint:</span>
+                      <span className="text-slate-200">{preflightData.databaseIsolation.actualEndpointId || 'None'}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block">Expected Endpoint:</span>
+                      <span className="text-slate-200">{preflightData.databaseIsolation.expectedEndpointId || 'Chưa đặt'}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4. Meta Token & Account Status */}
+                <div className="bg-slate-950/40 p-2.5 rounded-xl border border-slate-850 space-y-1 sm:col-span-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500 font-bold uppercase text-4xs flex items-center gap-1">
+                      <Key className="w-3 h-3 text-amber-400" /> Meta API & GIS Hà Nội Access
+                    </span>
+                    <span
+                      className={`px-1.5 py-0.2 rounded text-4xs font-bold uppercase border ${
+                        preflightData.meta.dataMode === 'LIVE'
+                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                          : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                      }`}
+                    >
+                      {preflightData.meta.dataMode}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-4xs font-mono text-slate-400">
+                    <div>
+                      <span className="text-slate-500 block">Token Meta:</span>
+                      <span className={preflightData.meta.tokenValid ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                        {preflightData.meta.tokenValid ? '✓ Hợp lệ (ads_read)' : '✗ Không hợp lệ'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block">GIS Hà Nội (act_1380498158917028):</span>
+                      <span className={preflightData.meta.targetAccountAccessible ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                        {preflightData.meta.targetAccountAccessible ? '✓ Sẵn sàng truy cập' : 'Chưa xác thực'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Connection List Panel (Right Panel) */}
