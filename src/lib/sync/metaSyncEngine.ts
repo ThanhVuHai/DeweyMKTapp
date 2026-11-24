@@ -52,7 +52,7 @@ export const ENABLED_ACCOUNTS_FOR_SYNC = ['act_1380498158917028', '1380498158917
 // Insights-First synchronization typically completes in 2-10 seconds.
 // A lease of 180 seconds provides ample margin while guaranteeing
 // stale/interrupted jobs are recovered without permanently locking the account.
-export const SYNC_JOB_LEASE_MS = 180 * 1000;
+export const SYNC_JOB_LEASE_MS = 330 * 1000; // 330 seconds lease, exceeds maxDuration=300s
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 

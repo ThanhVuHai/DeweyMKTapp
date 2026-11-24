@@ -35,8 +35,8 @@ test('batchProcess: Processes array in batches concurrently while maintaining re
   assert.deepStrictEqual(results, [2, 4, 6, 8, 10, 12, 14]);
 });
 
-test('SYNC_JOB_LEASE_MS: Bounded lease is configured to 180 seconds', () => {
-  assert.strictEqual(SYNC_JOB_LEASE_MS, 180 * 1000);
+test('SYNC_JOB_LEASE_MS: Bounded lease is configured to 330 seconds', () => {
+  assert.strictEqual(SYNC_JOB_LEASE_MS, 330 * 1000);
 });
 
 test('Stale Job Recovery: Detects and transitions expired running jobs to timeout', async () => {
