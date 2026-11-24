@@ -89,6 +89,7 @@ export default function DashboardPage() {
       totalImpressions: number;
       totalClicks: number;
     };
+    timings?: Record<string, number>;
     executionTimeMs: number;
   }
   const [showSyncModal, setShowSyncModal] = React.useState(false);
@@ -129,26 +130,75 @@ export default function DashboardPage() {
         const shortText = rawText
           ? rawText.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim().slice(0, 150)
           : '';
-        setSyncError(
-          `[HTTP ${res.status}] Máy chủ trả về phản hồi không phải JSON (${res.statusText || 'Lỗi server'}). ` +
-          `${shortText ? `Chi tiết: ${shortText}` : 'Có thể yêu cầu đã quá thời gian xử lý (Gateway Timeout). Vui lòng thử lại.'}`
-        );
+        if (res.status === 504) {
+          setSyncError(
+            `[HTTP 504 Gateway Timeout] Yêu cầu bị ngắt do quá thời gian thực thi Serverless trên Vercel. ` +
+            `Hệ thống sẽ tự động thu hồi lock an toàn.`
+          );
+        } else {
+          setSyncError(
+            `[HTTP ${res.status}] Máy chủ trả về phản hồi không phải JSON (${res.statusText || 'Lỗi server'}). ` +
+            `${shortText ? `Chi tiết: ${shortText}` : 'Có thể yêu cầu đã quá thời gian xử lý.'}`
+          );
+        }
         return;
       }
 
-      const result = await res.json();
-      if (res.ok && result.success) {
-        setSyncResultData(result.data);
+      let result: Record<string, unknown> | null = null;
+      try {
+        result = await res.json();
+      } catch (jsonErr: unknown) {
+        setSyncError(`[HTTP ${res.status}] Không thể đọc phản hồi JSON: ${(jsonErr as Error).message}`);
+        return;
+      }
+
+      if (res.ok && result?.success) {
+        setSyncResultData(result.data as SyncResultData);
         setTriggerRefresh(prev => prev + 1);
       } else {
-        const errorMsg = result.error || 'Đồng bộ dữ liệu Meta thất bại';
-        const codeInfo = result.errorCode ? `[${result.errorCode}] ` : '';
-        const stageInfo = result.stage ? `(Giai đoạn: ${result.stage}) ` : '';
-        const idInfo = result.correlationId ? `[ID: ${result.correlationId.slice(0, 8)}] ` : '';
+        const parseErr = (err: unknown): string => {
+          if (!err) return 'Đồng bộ dữ liệu Meta thất bại';
+          if (typeof err === 'string') return err;
+          if (typeof err === 'object') {
+            const o = err as Record<string, unknown>;
+            if (typeof o.message === 'string') return o.message;
+            if (typeof o.error === 'string') return o.error;
+            if (typeof o.error === 'object' && o.error !== null) {
+              const nested = o.error as Record<string, unknown>;
+              if (typeof nested.message === 'string') return nested.message;
+              if (typeof nested.code === 'string') return `[${nested.code}] ${nested.message || JSON.stringify(nested)}`;
+            }
+            if (typeof o.code === 'string' && typeof o.message === 'string') return `[${o.code}] ${o.message}`;
+            try {
+              const s = JSON.stringify(err);
+              return s === '{}' ? 'Đồng bộ dữ liệu Meta thất bại' : s;
+            } catch {
+              return 'Đồng bộ dữ liệu Meta thất bại';
+            }
+          }
+          return String(err);
+        };
+
+        const errorMsg = parseErr(result?.error || result);
+        const codeInfo = result?.errorCode ? `[${result.errorCode}] ` : '';
+        const stageInfo = result?.stage ? `(Giai đoạn: ${result.stage}) ` : '';
+        const idInfo = result?.correlationId ? `[ID: ${String(result.correlationId).slice(0, 8)}] ` : '';
         setSyncError(`${codeInfo}${stageInfo}${idInfo}${errorMsg}`);
       }
     } catch (err: unknown) {
-      const rawMsg = (err as Error).message || 'Lỗi mạng khi thực hiện đồng bộ';
+      const parseCatchErr = (e: unknown): string => {
+        if (!e) return 'Lỗi mạng khi thực hiện đồng bộ';
+        if (typeof e === 'string') return e;
+        if (e instanceof Error) return e.message;
+        if (typeof e === 'object') {
+          const o = e as Record<string, unknown>;
+          if (typeof o.message === 'string') return o.message;
+          try { return JSON.stringify(e); } catch { return 'Lỗi mạng khi thực hiện đồng bộ'; }
+        }
+        return String(e);
+      };
+
+      const rawMsg = parseCatchErr(err);
       if (rawMsg.includes('The string did not match the expected pattern') || rawMsg.includes('JSON')) {
         setSyncError('Phản hồi từ máy chủ không đúng định dạng JSON (có thể do Vercel Function timeout hoặc phản hồi HTML). Vui lòng thử lại.');
       } else {
@@ -747,6 +797,7 @@ export default function DashboardPage() {
                     </div>
                     <span className="text-4xs text-slate-500 font-mono">
                       {syncResultData.executionTimeMs}ms
+                      {syncResultData.timings?.insightsFetchMs ? ` (API: ${syncResultData.timings.insightsFetchMs}ms, DB: ${(syncResultData.timings.entitiesPersistenceMs || 0) + (syncResultData.timings.insightsPersistenceMs || 0)}ms)` : ''}
                     </span>
                   </div>
 

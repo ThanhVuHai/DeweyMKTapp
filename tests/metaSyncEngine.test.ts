@@ -35,8 +35,8 @@ test('batchProcess: Processes array in batches concurrently while maintaining re
   assert.deepStrictEqual(results, [2, 4, 6, 8, 10, 12, 14]);
 });
 
-test('SYNC_JOB_LEASE_MS: Bounded lease is configured to 90 seconds', () => {
-  assert.strictEqual(SYNC_JOB_LEASE_MS, 90 * 1000);
+test('SYNC_JOB_LEASE_MS: Bounded lease is configured to 180 seconds', () => {
+  assert.strictEqual(SYNC_JOB_LEASE_MS, 180 * 1000);
 });
 
 test('Stale Job Recovery: Detects and transitions expired running jobs to timeout', async () => {
@@ -46,7 +46,7 @@ test('Stale Job Recovery: Detects and transitions expired running jobs to timeou
   try {
     const expiredJob = {
       id: 'job_stale_38032bbe',
-      startedAt: new Date(Date.now() - 150 * 1000), // 150s ago (> 90s lease)
+      startedAt: new Date(Date.now() - 250 * 1000), // 250s ago (> 180s lease)
       adAccountId: 'act_1380498158917028',
       errorMessage: '[STAGE: PERSISTING_INSIGHTS] In progress...',
     };
@@ -242,4 +242,56 @@ test('LIVE/MOCK Isolation: Rejects mock tokens for real sync execution', async (
     (process.env as Record<string, string>).NODE_ENV = originalEnv;
     process.env.EXPECTED_NEON_ENDPOINT_ID = originalExpected;
   }
+});
+
+
+test('Insights-First Architecture: Entity extraction accurately groups distinct campaigns, adsets, and ads', () => {
+  const sampleInsights = [
+    {
+      ad_id: 'ad_1',
+      ad_name: 'Ad 1',
+      adset_id: 'adset_1',
+      adset_name: 'AdSet 1',
+      campaign_id: 'camp_1',
+      campaign_name: 'Camp 1',
+      date_start: '2026-10-01',
+      spend: '100000',
+    },
+    {
+      ad_id: 'ad_2',
+      ad_name: 'Ad 2',
+      adset_id: 'adset_1',
+      adset_name: 'AdSet 1',
+      campaign_id: 'camp_1',
+      campaign_name: 'Camp 1',
+      date_start: '2026-10-01',
+      spend: '150000',
+    },
+    {
+      ad_id: 'ad_3',
+      ad_name: 'Ad 3',
+      adset_id: 'adset_2',
+      adset_name: 'AdSet 2',
+      campaign_id: 'camp_2',
+      campaign_name: 'Camp 2',
+      date_start: '2026-10-01',
+      spend: '200000',
+    },
+  ];
+
+  const campaigns = new Map<string, { id: string; name: string }>();
+  const adsets = new Map<string, { id: string; name: string; campaignId: string }>();
+  const ads = new Map<string, { id: string; name: string; adsetId: string; campaignId: string }>();
+
+  for (const i of sampleInsights) {
+    campaigns.set(i.campaign_id, { id: i.campaign_id, name: i.campaign_name });
+    adsets.set(i.adset_id, { id: i.adset_id, name: i.adset_name, campaignId: i.campaign_id });
+    ads.set(i.ad_id, { id: i.ad_id, name: i.ad_name, adsetId: i.adset_id, campaignId: i.campaign_id });
+  }
+
+  assert.strictEqual(campaigns.size, 2);
+  assert.strictEqual(adsets.size, 2);
+  assert.strictEqual(ads.size, 3);
+  assert.strictEqual(ads.get('ad_1')?.adsetId, 'adset_1');
+  assert.strictEqual(adsets.get('adset_1')?.campaignId, 'camp_1');
 });

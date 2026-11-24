@@ -35,6 +35,7 @@ export interface SyncResult {
     totalImpressions: number;
     totalClicks: number;
   };
+  timings?: Record<string, number>;
   executionTimeMs: number;
   error?: string;
 }
@@ -47,10 +48,11 @@ export interface StaleJobRecoveryResult {
 // Allowed accounts during initial testing (Strict scope control)
 export const ENABLED_ACCOUNTS_FOR_SYNC = ['act_1380498158917028', '1380498158917028'];
 
-// Bounded lease for Serverless Execution (90 seconds).
-// Since Vercel Serverless Function maxDuration is 60s, any job still 'running'
-// after 90 seconds is guaranteed to have timed out or terminated.
-export const SYNC_JOB_LEASE_MS = 90 * 1000;
+// Bounded lease for Serverless Execution (180 seconds).
+// Insights-First synchronization typically completes in 2-10 seconds.
+// A lease of 180 seconds provides ample margin while guaranteeing
+// stale/interrupted jobs are recovered without permanently locking the account.
+export const SYNC_JOB_LEASE_MS = 180 * 1000;
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -147,14 +149,23 @@ export class MetaSyncEngine {
   }
 
   /**
-   * Synchronizes advertising structure and daily ad-level insights
-   * from Meta Marketing API into Neon PostgreSQL.
+   * Synchronizes daily advertising performance and active structure
+   * from Meta Marketing API into Neon PostgreSQL using an Insights-First architecture.
+   *
+   * Insights-First Architecture:
+   * 1. Fetches daily ad-level performance records specifically for the requested date window.
+   * 2. Extracts only the active Campaign, AdSet, and Ad entities present in that performance data.
+   * 3. Persists entities in strict foreign-key dependency order (AdAccount -> Campaign -> AdSet -> Ad).
+   * 4. Batch-upserts daily insights with verified metrics.
+   *
+   * This guarantees execution in seconds instead of timing out on large historical catalogs.
    */
   public static async syncAdAccount(
     connection: MetaConnectionParam & { id: string },
     options: SyncOptions
   ): Promise<SyncResult> {
     const startTime = Date.now();
+    const timings: Record<string, number> = {};
     const normalizedAccountId = normalizeAdAccountId(options.adAccountId);
     const jobType = options.jobType || 'manual_sync';
 
@@ -168,7 +179,6 @@ export class MetaSyncEngine {
     }
 
     // 2. Database Isolation Guard (Safety First: Never write to Production during Preview testing)
-    // Only bypass in local unit tests with file:./dev.db
     if (process.env.NODE_ENV !== 'test') {
       assertDatabaseIsolation();
     }
@@ -183,10 +193,9 @@ export class MetaSyncEngine {
     }
 
     // 4. Stale Job Recovery & Concurrency Protection (Bounded Lease Lock)
-    // 4a. First, automatically detect and recover any stale jobs for this account
+    const tLockStart = Date.now();
     await MetaSyncEngine.recoverStaleJobs(normalizedAccountId);
 
-    // 4b. Check for genuinely active running jobs within the lease duration
     const leaseCutoff = new Date(Date.now() - SYNC_JOB_LEASE_MS);
     const activeRunningJob = await prisma.syncJob.findFirst({
       where: {
@@ -208,6 +217,7 @@ export class MetaSyncEngine {
         `Vui lòng chờ khoảng ${remainingSec}s để tiến trình hoàn tất hoặc tự động giải phóng lock.`
       );
     }
+    timings['lockAcquisitionMs'] = Date.now() - tLockStart;
 
     // Resolve date window (Defaults to last 30 days if unspecified)
     const now = new Date();
@@ -228,12 +238,17 @@ export class MetaSyncEngine {
         dateFrom: new Date(dateFrom + 'T00:00:00.000Z'),
         dateTo: new Date(dateTo + 'T23:59:59.999Z'),
         startedAt: new Date(),
-        errorMessage: '[Giai đoạn 1/4] Đang khởi tạo và kết nối Meta API...',
+        errorMessage: '[Giai đoạn 1/5] Khởi tạo kết nối Meta API và xác thực AdAccount...',
       },
     });
 
+    console.log(
+      `[MetaSyncEngine:Start] Job ${syncJob.id} started for account ${normalizedAccountId} (${dateFrom} -> ${dateTo})`
+    );
+
     try {
       // 6. Fetch Ad Account Details & Upsert AdAccount in DB
+      const tAccountStart = Date.now();
       const accountInfo = await MetaApiService.getAdAccount(normalizedAccountId, connection);
 
       const dbAdAccount = await prisma.adAccount.upsert({
@@ -254,220 +269,187 @@ export class MetaSyncEngine {
           status: accountInfo.status || 'ACTIVE',
         },
       });
+      timings['adAccountSyncMs'] = Date.now() - tAccountStart;
+      console.log(`[MetaSyncEngine:Stage] AdAccount ${accountInfo.accountName} upserted in ${timings['adAccountSyncMs']}ms`);
 
-      // Update progress stage
+      // Update progress
       await prisma.syncJob.update({
         where: { id: syncJob.id },
         data: {
-          errorMessage: `[Giai đoạn 2/4] Đã nạp AdAccount ${accountInfo.accountName}. Đang lấy Chiến dịch...`,
+          errorMessage: `[Giai đoạn 2/5] Đang tải Daily Insights từ Meta API (${dateFrom} đến ${dateTo})...`,
         },
       });
 
-      // 7. Complete Campaign Pagination & Idempotent Upsert (Batched)
-      const campaignsResult = await MetaApiService.getCampaignsPaged(
-        normalizedAccountId,
-        connection,
-        { limit: 50, maxPages: options.maxPages || 50 }
-      );
-      const campaigns = campaignsResult.data;
-
-      const campaignMap = new Map<string, string>();
-      await batchProcess(campaigns, 10, async (c) => {
-        const dbCampaign = await prisma.campaign.upsert({
-          where: { campaignId: c.id },
-          update: {
-            campaignName: c.name || `Campaign ${c.id}`,
-            objective: c.objective || null,
-            status: c.status || 'UNKNOWN',
-            effectiveStatus: c.effective_status || c.status || 'UNKNOWN',
-            buyingType: c.buying_type || null,
-            dailyBudget: c.daily_budget ? parseFloat(c.daily_budget) : null,
-            lifetimeBudget: c.lifetime_budget ? parseFloat(c.lifetime_budget) : null,
-            startTime: c.start_time ? new Date(c.start_time) : null,
-            endTime: c.stop_time ? new Date(c.stop_time) : null,
-            rawJson: JSON.stringify(c),
-          },
-          create: {
-            adAccountId: dbAdAccount.id,
-            campaignId: c.id,
-            campaignName: c.name || `Campaign ${c.id}`,
-            objective: c.objective || null,
-            status: c.status || 'UNKNOWN',
-            effectiveStatus: c.effective_status || c.status || 'UNKNOWN',
-            buyingType: c.buying_type || null,
-            dailyBudget: c.daily_budget ? parseFloat(c.daily_budget) : null,
-            lifetimeBudget: c.lifetime_budget ? parseFloat(c.lifetime_budget) : null,
-            startTime: c.start_time ? new Date(c.start_time) : null,
-            endTime: c.stop_time ? new Date(c.stop_time) : null,
-            rawJson: JSON.stringify(c),
-          },
-        });
-        campaignMap.set(c.id, dbCampaign.id);
-      });
-
-      // Update progress stage
-      await prisma.syncJob.update({
-        where: { id: syncJob.id },
-        data: {
-          errorMessage: `[Giai đoạn 3/4] Đã nạp ${campaigns.length} Chiến dịch. Đang lấy Nhóm QC & Mẫu QC...`,
-        },
-      });
-
-      // 8. Complete AdSet Pagination & Idempotent Upsert (Batched)
-      const adsetsResult = await MetaApiService.getAdSetsPaged(
-        normalizedAccountId,
-        connection,
-        { limit: 50, maxPages: options.maxPages || 50 }
-      );
-      const adsets = adsetsResult.data;
-
-      // Ensure missing placeholder campaigns exist
-      for (const as of adsets) {
-        if (as.campaign_id && !campaignMap.has(as.campaign_id)) {
-          const placeholder = await prisma.campaign.create({
-            data: {
-              adAccountId: dbAdAccount.id,
-              campaignId: as.campaign_id,
-              campaignName: `Campaign ${as.campaign_id}`,
-              status: 'UNKNOWN',
-              effectiveStatus: 'UNKNOWN',
-            },
-          });
-          campaignMap.set(as.campaign_id, placeholder.id);
-        }
-      }
-
-      await batchProcess(adsets, 15, async (as) => {
-        const parentCampaignDbId = as.campaign_id ? campaignMap.get(as.campaign_id) : undefined;
-        if (parentCampaignDbId) {
-          await prisma.adSet.upsert({
-            where: { adsetId: as.id },
-            update: {
-              adsetName: as.name || `AdSet ${as.id}`,
-              optimizationGoal: as.optimization_goal || null,
-              billingEvent: as.billing_event || null,
-              bidStrategy: as.bid_strategy || null,
-              dailyBudget: as.daily_budget ? parseFloat(as.daily_budget) : null,
-              lifetimeBudget: as.lifetime_budget ? parseFloat(as.lifetime_budget) : null,
-              targetingJson: as.targeting ? JSON.stringify(as.targeting) : null,
-              status: as.status || 'UNKNOWN',
-              effectiveStatus: as.effective_status || as.status || 'UNKNOWN',
-              startTime: as.start_time ? new Date(as.start_time) : null,
-              endTime: as.end_time ? new Date(as.end_time) : null,
-              rawJson: JSON.stringify(as),
-            },
-            create: {
-              adAccountId: dbAdAccount.id,
-              campaignId: parentCampaignDbId,
-              adsetId: as.id,
-              adsetName: as.name || `AdSet ${as.id}`,
-              optimizationGoal: as.optimization_goal || null,
-              billingEvent: as.billing_event || null,
-              bidStrategy: as.bid_strategy || null,
-              dailyBudget: as.daily_budget ? parseFloat(as.daily_budget) : null,
-              lifetimeBudget: as.lifetime_budget ? parseFloat(as.lifetime_budget) : null,
-              targetingJson: as.targeting ? JSON.stringify(as.targeting) : null,
-              status: as.status || 'UNKNOWN',
-              effectiveStatus: as.effective_status || as.status || 'UNKNOWN',
-              startTime: as.start_time ? new Date(as.start_time) : null,
-              endTime: as.end_time ? new Date(as.end_time) : null,
-              rawJson: JSON.stringify(as),
-            },
-          });
-        }
-      });
-
-      // Map of existing AdSet IDs for foreign key lookup
-      const adsetMap = new Map<string, string>();
-      const dbAdSets = await prisma.adSet.findMany({
-        where: { adAccountId: dbAdAccount.id },
-        select: { id: true, adsetId: true },
-      });
-      dbAdSets.forEach(as => adsetMap.set(as.adsetId, as.id));
-
-      // 9. Complete Ad Pagination & Idempotent Upsert (Batched)
-      const adsResult = await MetaApiService.getAdsPaged(
-        normalizedAccountId,
-        connection,
-        { limit: 50, maxPages: options.maxPages || 50 }
-      );
-      const ads = adsResult.data;
-
-      await batchProcess(ads, 20, async (ad) => {
-        const parentCampaignDbId = ad.campaign_id ? campaignMap.get(ad.campaign_id) : undefined;
-        const parentAdSetDbId = ad.adset_id ? adsetMap.get(ad.adset_id) : undefined;
-
-        if (parentCampaignDbId && parentAdSetDbId) {
-          await prisma.ad.upsert({
-            where: { adId: ad.id },
-            update: {
-              adName: ad.name || `Ad ${ad.id}`,
-              creativeId: ad.creative?.id || null,
-              status: ad.status || 'UNKNOWN',
-              effectiveStatus: ad.effective_status || ad.status || 'UNKNOWN',
-              createdTime: ad.created_time ? new Date(ad.created_time) : null,
-              updatedTime: ad.updated_time ? new Date(ad.updated_time) : null,
-              rawJson: JSON.stringify(ad),
-            },
-            create: {
-              adAccountId: dbAdAccount.id,
-              campaignId: parentCampaignDbId,
-              adsetId: parentAdSetDbId,
-              adId: ad.id,
-              adName: ad.name || `Ad ${ad.id}`,
-              creativeId: ad.creative?.id || null,
-              status: ad.status || 'UNKNOWN',
-              effectiveStatus: ad.effective_status || ad.status || 'UNKNOWN',
-              createdTime: ad.created_time ? new Date(ad.created_time) : null,
-              updatedTime: ad.updated_time ? new Date(ad.updated_time) : null,
-              rawJson: JSON.stringify(ad),
-            },
-          });
-        }
-      });
-
-      // Update progress stage
-      await prisma.syncJob.update({
-        where: { id: syncJob.id },
-        data: {
-          errorMessage: `[Giai đoạn 4/4] Đã lưu ${campaigns.length} Chiến dịch, ${adsets.length} Nhóm QC, ${ads.length} Mẫu QC. Đang lấy Daily Insights...`,
-        },
-      });
-
-      // 10. Complete Daily Ad-Level Insights Pagination & Idempotent Upsert (Batched)
+      // 7. Insights-First: Retrieve Daily Ad-Level Insights for requested date range
+      const tInsightsFetchStart = Date.now();
       const insightsResult = await MetaApiService.getInsightsPaged(
         normalizedAccountId,
         connection,
         'ad',
         dateFrom,
         dateTo,
-        { limit: 100, maxPages: options.maxPages ? options.maxPages * 2 : 100 }
+        { limit: 100, maxPages: options.maxPages || 100 }
       );
-      const dailyInsights = insightsResult.data;
+      const rawInsights = insightsResult.data;
+      timings['insightsFetchMs'] = Date.now() - tInsightsFetchStart;
+      console.log(
+        `[MetaSyncEngine:Timing] Retrieved ${rawInsights.length} raw insight records across ` +
+        `${insightsResult.pagesFetched} page(s) in ${timings['insightsFetchMs']}ms`
+      );
+
+      // Filter valid insights with ad_id and date_start
+      const validInsights = rawInsights.filter(i => i.ad_id && i.date_start);
+
+      // 8. Extract Distinct Active Entities from Insights Data
+      const tExtractStart = Date.now();
+      const distinctCampaigns = new Map<string, { id: string; name: string }>();
+      const distinctAdSets = new Map<string, { id: string; name: string; campaignId?: string }>();
+      const distinctAds = new Map<string, { id: string; name: string; adsetId?: string; campaignId?: string }>();
 
       let totalSpend = 0;
       let totalImpressions = 0;
       let totalClicks = 0;
 
-      // Filter valid insights
-      const validInsights = dailyInsights.filter(insight => insight.ad_id && insight.date_start);
+      for (const i of validInsights) {
+        totalSpend += parseFloat(i.spend || '0');
+        totalImpressions += parseInt(i.impressions || '0', 10);
+        totalClicks += parseInt(i.clicks || '0', 10);
 
-      // Pre-calculate aggregates
-      for (const insight of validInsights) {
-        totalSpend += parseFloat(insight.spend || '0');
-        totalImpressions += parseInt(insight.impressions || '0', 10);
-        totalClicks += parseInt(insight.clicks || '0', 10);
+        if (i.campaign_id) {
+          distinctCampaigns.set(i.campaign_id, {
+            id: i.campaign_id,
+            name: i.campaign_name || `Campaign ${i.campaign_id}`,
+          });
+        }
+        if (i.adset_id) {
+          distinctAdSets.set(i.adset_id, {
+            id: i.adset_id,
+            name: i.adset_name || `AdSet ${i.adset_id}`,
+            campaignId: i.campaign_id,
+          });
+        }
+        if (i.ad_id) {
+          distinctAds.set(i.ad_id, {
+            id: i.ad_id,
+            name: i.ad_name || `Ad ${i.ad_id}`,
+            adsetId: i.adset_id,
+            campaignId: i.campaign_id,
+          });
+        }
       }
+      timings['extractionMs'] = Date.now() - tExtractStart;
+      console.log(
+        `[MetaSyncEngine:Extraction] Found ${distinctCampaigns.size} campaigns, ` +
+        `${distinctAdSets.size} adsets, ${distinctAds.size} ads from ${validInsights.length} insights.`
+      );
 
-      // Update progress stage before batch database persistence
+      // Update progress
       await prisma.syncJob.update({
         where: { id: syncJob.id },
         data: {
-          errorMessage: `[Giai đoạn 4/4] Đang ghi ${validInsights.length} bản ghi Daily Insights vào Neon PostgreSQL...`,
+          errorMessage: `[Giai đoạn 3/5] Đang ghi nạp cấu trúc ${distinctCampaigns.size} Chiến dịch, ${distinctAdSets.size} Nhóm QC, ${distinctAds.size} Mẫu QC...`,
         },
       });
 
-      // Batch upsert insights into database in chunks of 20
+      // 9. Foreign-Key Ordered Entity Persistence (Batched)
+      const tEntityPersistStart = Date.now();
+
+      // 9a. Campaigns Upsert
+      const campaignDbIdMap = new Map<string, string>();
+      const campaignList = Array.from(distinctCampaigns.values());
+      await batchProcess(campaignList, 10, async (c) => {
+        const dbCampaign = await prisma.campaign.upsert({
+          where: { campaignId: c.id },
+          update: {
+            campaignName: c.name,
+          },
+          create: {
+            adAccountId: dbAdAccount.id,
+            campaignId: c.id,
+            campaignName: c.name,
+            status: 'ACTIVE',
+            effectiveStatus: 'ACTIVE',
+          },
+        });
+        campaignDbIdMap.set(c.id, dbCampaign.id);
+      });
+
+      // 9b. AdSets Upsert
+      const adsetDbIdMap = new Map<string, string>();
+      const adsetList = Array.from(distinctAdSets.values());
+      await batchProcess(adsetList, 15, async (as) => {
+        let parentCampaignDbId = as.campaignId ? campaignDbIdMap.get(as.campaignId) : undefined;
+        if (!parentCampaignDbId && as.campaignId) {
+          // Edge case: create placeholder campaign if missing
+          const placeholder = await prisma.campaign.create({
+            data: {
+              adAccountId: dbAdAccount.id,
+              campaignId: as.campaignId,
+              campaignName: `Campaign ${as.campaignId}`,
+              status: 'UNKNOWN',
+              effectiveStatus: 'UNKNOWN',
+            },
+          });
+          parentCampaignDbId = placeholder.id;
+          campaignDbIdMap.set(as.campaignId, placeholder.id);
+        }
+
+        if (parentCampaignDbId) {
+          const dbAdSet = await prisma.adSet.upsert({
+            where: { adsetId: as.id },
+            update: {
+              adsetName: as.name,
+            },
+            create: {
+              adAccountId: dbAdAccount.id,
+              campaignId: parentCampaignDbId,
+              adsetId: as.id,
+              adsetName: as.name,
+              status: 'ACTIVE',
+              effectiveStatus: 'ACTIVE',
+            },
+          });
+          adsetDbIdMap.set(as.id, dbAdSet.id);
+        }
+      });
+
+      // 9c. Ads Upsert
+      const adList = Array.from(distinctAds.values());
+      await batchProcess(adList, 20, async (ad) => {
+        const parentCampaignDbId = ad.campaignId ? campaignDbIdMap.get(ad.campaignId) : undefined;
+        const parentAdSetDbId = ad.adsetId ? adsetDbIdMap.get(ad.adsetId) : undefined;
+
+        if (parentCampaignDbId && parentAdSetDbId) {
+          await prisma.ad.upsert({
+            where: { adId: ad.id },
+            update: {
+              adName: ad.name,
+            },
+            create: {
+              adAccountId: dbAdAccount.id,
+              campaignId: parentCampaignDbId,
+              adsetId: parentAdSetDbId,
+              adId: ad.id,
+              adName: ad.name,
+              status: 'ACTIVE',
+              effectiveStatus: 'ACTIVE',
+            },
+          });
+        }
+      });
+      timings['entitiesPersistenceMs'] = Date.now() - tEntityPersistStart;
+      console.log(`[MetaSyncEngine:Timing] Persisted active entities in ${timings['entitiesPersistenceMs']}ms`);
+
+      // Update progress
+      await prisma.syncJob.update({
+        where: { id: syncJob.id },
+        data: {
+          errorMessage: `[Giai đoạn 4/5] Đang ghi ${validInsights.length} bản ghi Daily Insights vào Neon...`,
+        },
+      });
+
+      // 10. Batch Upsert InsightsDaily (Parallel Batches of 20)
+      const tInsightsPersistStart = Date.now();
       await batchProcess(validInsights, 20, async (insight) => {
         const dateObj = new Date(insight.date_start + 'T00:00:00.000Z');
         const spendVal = parseFloat(insight.spend || '0');
@@ -547,8 +529,10 @@ export class MetaSyncEngine {
           },
         });
       });
+      timings['insightsPersistenceMs'] = Date.now() - tInsightsPersistStart;
+      console.log(`[MetaSyncEngine:Timing] Persisted ${validInsights.length} insights in ${timings['insightsPersistenceMs']}ms`);
 
-      // 11. Expired Worker Protection: Ensure our job lease was not revoked or superseded
+      // 11. Expired Worker Protection: Ensure our job lease was not revoked
       const currentJobState = await prisma.syncJob.findUnique({
         where: { id: syncJob.id },
         select: { status: true },
@@ -579,6 +563,14 @@ export class MetaSyncEngine {
         },
       });
 
+      const totalExecutionTimeMs = Date.now() - startTime;
+      timings['totalExecutionTimeMs'] = totalExecutionTimeMs;
+      console.log(
+        `[MetaSyncEngine:Complete] Job ${syncJob.id} completed successfully in ${totalExecutionTimeMs}ms. ` +
+        `Persisted ${campaignList.length} campaigns, ${adsetList.length} adsets, ${adList.length} ads, ${validInsights.length} insights. ` +
+        `Total Spend: ${Math.round(totalSpend)} VND, Imp: ${totalImpressions}, Clicks: ${totalClicks}`
+      );
+
       return {
         success: true,
         jobId: syncJob.id,
@@ -587,9 +579,9 @@ export class MetaSyncEngine {
         accountName: accountInfo.accountName,
         dateRange: { since: dateFrom, until: dateTo },
         counts: {
-          campaignsUpserted: campaigns.length,
-          adsetsUpserted: adsets.length,
-          adsUpserted: ads.length,
+          campaignsUpserted: campaignList.length,
+          adsetsUpserted: adsetList.length,
+          adsUpserted: adList.length,
           insightsUpserted: validInsights.length,
         },
         metrics: {
@@ -597,7 +589,8 @@ export class MetaSyncEngine {
           totalImpressions,
           totalClicks,
         },
-        executionTimeMs: Date.now() - startTime,
+        timings,
+        executionTimeMs: totalExecutionTimeMs,
       };
     } catch (error: unknown) {
       const errorMsg = (error as Error).message || 'Unknown sync error';

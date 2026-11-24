@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { MetaSyncEngine, ENABLED_ACCOUNTS_FOR_SYNC } from '@/lib/sync/metaSyncEngine';
 import { isMockToken, MetaApiService } from '@/lib/meta';
 
-export const maxDuration = 60; // Max serverless function timeout
+export const maxDuration = 300; // Max serverless function timeout (Fluid Compute up to 300s)
 
 /**
  * Scheduled Meta Ads Daily Synchronization Endpoint

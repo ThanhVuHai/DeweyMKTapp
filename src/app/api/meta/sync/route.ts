@@ -5,8 +5,8 @@ import { verifyAuth } from '@/lib/auth';
 import { MetaSyncEngine, ENABLED_ACCOUNTS_FOR_SYNC, normalizeSyncDate } from '@/lib/sync/metaSyncEngine';
 import { normalizeAdAccountId, MetaApiError } from '@/lib/meta';
 
-// Vercel Serverless Function Configuration
-export const maxDuration = 60; // Allow up to 60 seconds for synchronization execution
+// Vercel Serverless Function Configuration (Fluid Compute supports up to 300 seconds)
+export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
 // POST: Execute Manual Meta Ads Synchronization
