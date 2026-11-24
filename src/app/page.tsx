@@ -95,6 +95,7 @@ export default function DashboardPage() {
   const [syncModalAccount, setSyncModalAccount] = React.useState('act_1380498158917028');
   const [syncModalDateFrom, setSyncModalDateFrom] = React.useState('2026-10-01');
   const [syncModalDateTo, setSyncModalDateTo] = React.useState('2026-10-31');
+  const [syncForce, setSyncForce] = React.useState(false);
   const [syncResultData, setSyncResultData] = React.useState<SyncResultData | null>(null);
   const [syncError, setSyncError] = React.useState<string | null>(null);
 
@@ -118,6 +119,7 @@ export default function DashboardPage() {
           adAccountId: syncModalAccount,
           dateFrom: syncModalDateFrom,
           dateTo: syncModalDateTo,
+          force: syncForce,
         }),
       });
 
@@ -697,6 +699,20 @@ export default function DashboardPage() {
                       className="w-full px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-200 text-xs focus:outline-none"
                     />
                   </div>
+                </div>
+
+                {/* Force sync option */}
+                <div className="flex items-center space-x-2 px-1">
+                  <input
+                    type="checkbox"
+                    id="syncForceCheck"
+                    checked={syncForce}
+                    onChange={e => setSyncForce(e.target.checked)}
+                    className="rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-0"
+                  />
+                  <label htmlFor="syncForceCheck" className="text-4xs text-slate-400 cursor-pointer select-none">
+                    Ghi đè và giải phóng lock nếu có tiến trình khác bị kẹt (Force Sync)
+                  </label>
                 </div>
               </div>
 

@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { verifyAuth } from '@/lib/auth';
+import { MetaSyncEngine } from '@/lib/sync/metaSyncEngine';
 
-// GET: Fetch recent sync jobs and execution history
+export const dynamic = 'force-dynamic';
+
+// GET: Fetch recent sync jobs and execution history (with auto-recovery of stale jobs)
 export async function GET(request: Request) {
   try {
     const auth = await verifyAuth(request);
@@ -16,6 +19,9 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const limit = Math.min(parseInt(searchParams.get('limit') || '10', 10), 50);
     const adAccountId = searchParams.get('adAccountId');
+
+    // 1. Auto-recover any stale RUNNING jobs whose lease has expired
+    await MetaSyncEngine.recoverStaleJobs(adAccountId || undefined);
 
     const whereClause: { adAccountId?: string } = {};
     if (adAccountId) {
@@ -89,6 +95,31 @@ export async function GET(request: Request) {
           totalClicks: aggregates._sum.clicks || 0,
         },
       },
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ success: false, error: errorMsg }, { status: 500 });
+  }
+}
+
+// POST: Explicitly trigger stale job recovery and unlock accounts
+export async function POST(request: Request) {
+  try {
+    const auth = await verifyAuth(request);
+    if (!auth.authenticated) {
+      return NextResponse.json(
+        { error: 'Chưa đăng nhập. Vui lòng đăng nhập lại.' },
+        { status: 401 }
+      );
+    }
+
+    const body = await request.json().catch(() => ({}));
+    const recoveryResult = await MetaSyncEngine.recoverStaleJobs(body.adAccountId);
+
+    return NextResponse.json({
+      success: true,
+      message: `Đã kiểm tra và thu hồi ${recoveryResult.recoveredCount} tiến trình quá hạn.`,
+      data: recoveryResult,
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : 'Unknown error';

@@ -238,6 +238,7 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
   const [syncHistory, setSyncHistory] = React.useState<SyncJobItem[]>([]);
   const [syncSummary, setSyncSummary] = React.useState<SyncSummaryData | null>(null);
   const [loadingSyncJobs, setLoadingSyncJobs] = React.useState(false);
+  const [recoveringStaleJobs, setRecoveringStaleJobs] = React.useState(false);
 
   const fetchSyncJobs = React.useCallback(async () => {
     setLoadingSyncJobs(true);
@@ -254,6 +255,28 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
       setLoadingSyncJobs(false);
     }
   }, []);
+
+  const handleRecoverStaleJobs = async () => {
+    setRecoveringStaleJobs(true);
+    try {
+      const res = await fetch('/api/meta/sync/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adAccountId: 'act_1380498158917028' }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        await fetchSyncJobs();
+        alert(data.message || 'Đã kiểm tra và giải phóng lock.');
+      } else {
+        alert(data.error || 'Thu hồi lock thất bại.');
+      }
+    } catch (err: unknown) {
+      alert((err as Error).message || 'Lỗi mạng khi thu hồi lock');
+    } finally {
+      setRecoveringStaleJobs(false);
+    }
+  };
 
   React.useEffect(() => {
     async function fetchConnections() {
@@ -1213,6 +1236,16 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
             <div className="flex items-center space-x-2 shrink-0">
               <button
                 type="button"
+                onClick={handleRecoverStaleJobs}
+                disabled={recoveringStaleJobs}
+                title="Quét và thu hồi các tiến trình bị timeout hoặc chết kết nối để giải phóng lock"
+                className="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-lg text-3xs font-bold transition-all flex items-center space-x-1"
+              >
+                <ShieldAlert className={`w-3 h-3 ${recoveringStaleJobs ? 'animate-spin' : ''}`} />
+                <span>{recoveringStaleJobs ? 'Đang kiểm tra...' : 'Thu hồi Stale Lock'}</span>
+              </button>
+              <button
+                type="button"
                 onClick={fetchSyncJobs}
                 disabled={loadingSyncJobs}
                 className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg text-3xs font-bold transition-all flex items-center space-x-1"
@@ -1237,6 +1270,9 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
               <span className="text-slate-500 font-bold uppercase text-4xs block">Lập lịch Tự động (Cron)</span>
               <span className="font-bold text-slate-200 block">Hàng ngày 09:00 AM</span>
               <span className="text-slate-500 text-4xs block">02:00 UTC (Vercel Cron)</span>
+              <span className="text-amber-400/80 text-4xs block pt-0.5">
+                (Lưu ý: Vercel Cron chỉ tự động chạy trên Production. Trên Preview, đồng bộ qua nút &quot;Sync Now&quot;)
+              </span>
             </div>
 
             <div className="bg-slate-900/60 p-3 rounded-xl border border-slate-850 space-y-1">
@@ -1277,41 +1313,81 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
                       <th className="p-2">Loại tác vụ</th>
                       <th className="p-2">Tài khoản</th>
                       <th className="p-2">Trạng thái</th>
-                      <th className="p-2">Thời gian</th>
-                      <th className="p-2">Ghi chú / Lỗi</th>
+                      <th className="p-2">Thời gian &amp; Thời lượng</th>
+                      <th className="p-2">Tiến độ / Ghi chú / Lỗi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-850">
-                    {syncHistory.map(job => (
-                      <tr key={job.id} className="hover:bg-slate-900/30">
-                        <td className="p-2 font-mono text-4xs text-slate-300">{job.id.slice(0, 8)}</td>
-                        <td className="p-2">
-                          <span className="font-medium text-slate-200">
-                            {job.jobType === 'scheduled_cron' ? 'Lập lịch (Cron)' : 'Thủ công (Manual)'}
-                          </span>
-                        </td>
-                        <td className="p-2 font-mono text-4xs">{job.adAccountId || 'N/A'}</td>
-                        <td className="p-2">
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-4xs font-bold uppercase ${
-                              job.status === 'success'
-                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                                : job.status === 'running'
-                                ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse'
-                                : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                            }`}
-                          >
-                            {job.status}
-                          </span>
-                        </td>
-                        <td className="p-2 text-4xs font-mono text-slate-500">
-                          {job.startedAt ? formatDate(job.startedAt) : 'N/A'}
-                        </td>
-                        <td className="p-2 text-4xs truncate max-w-xs text-rose-300">
-                          {job.errorMessage || 'Hoàn tất an toàn'}
-                        </td>
-                      </tr>
-                    ))}
+                    {syncHistory.map(job => {
+                      const isSuccess = job.status === 'success';
+                      const isRunning = job.status === 'running';
+                      const isTimeout = job.status === 'timeout' || job.status === 'interrupted';
+                      const isFailed = job.status === 'failed';
+
+                      // Calculate execution duration
+                      let durationText = '';
+                      if (job.finishedAt && job.startedAt) {
+                        const durSec = Math.max(1, Math.round((new Date(job.finishedAt).getTime() - new Date(job.startedAt).getTime()) / 1000));
+                        durationText = ` (${durSec}s)`;
+                      } else if (isRunning && job.startedAt) {
+                        const elapsedSec = Math.round((Date.now() - new Date(job.startedAt).getTime()) / 1000);
+                        durationText = ` (${elapsedSec}s đang chạy)`;
+                      }
+
+                      return (
+                        <tr key={job.id} className="hover:bg-slate-900/30">
+                          <td className="p-2 font-mono text-4xs text-slate-300">{job.id.slice(0, 8)}</td>
+                          <td className="p-2">
+                            <span className="font-medium text-slate-200">
+                              {job.jobType === 'scheduled_cron' ? 'Lập lịch (Cron)' : 'Thủ công (Manual)'}
+                            </span>
+                          </td>
+                          <td className="p-2 font-mono text-4xs">{job.adAccountId || 'N/A'}</td>
+                          <td className="p-2">
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-4xs font-bold uppercase ${
+                                isSuccess
+                                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                  : isRunning
+                                  ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse'
+                                  : isTimeout
+                                  ? 'bg-orange-500/10 text-orange-400 border border-orange-500/20'
+                                  : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                              }`}
+                            >
+                              {job.status}
+                            </span>
+                          </td>
+                          <td className="p-2 text-4xs font-mono text-slate-400 whitespace-nowrap">
+                            <span>{job.startedAt ? formatDate(job.startedAt) : 'N/A'}</span>
+                            {durationText && <span className="text-slate-500 font-semibold">{durationText}</span>}
+                          </td>
+                          <td className="p-2 text-4xs max-w-sm truncate">
+                            {isRunning ? (
+                              <span className="text-amber-300 font-medium">
+                                {job.errorMessage || 'Đang thực thi đồng bộ dữ liệu...'}
+                              </span>
+                            ) : isSuccess ? (
+                              <span className="text-emerald-400 font-medium">
+                                Đồng bộ hoàn tất an toàn
+                              </span>
+                            ) : isTimeout ? (
+                              <span className="text-orange-300 font-medium" title={job.errorMessage || ''}>
+                                {job.errorMessage || 'Hết hạn lease (Timeout) - Đã giải phóng lock an toàn'}
+                              </span>
+                            ) : isFailed ? (
+                              <span className="text-rose-400 font-medium" title={job.errorMessage || ''}>
+                                {job.errorMessage || 'Tiến trình thất bại'}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 font-medium">
+                                {job.errorMessage || job.status}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

@@ -39,8 +39,18 @@ export interface SyncResult {
   error?: string;
 }
 
+export interface StaleJobRecoveryResult {
+  recoveredCount: number;
+  recoveredJobIds: string[];
+}
+
 // Allowed accounts during initial testing (Strict scope control)
 export const ENABLED_ACCOUNTS_FOR_SYNC = ['act_1380498158917028', '1380498158917028'];
+
+// Bounded lease for Serverless Execution (90 seconds).
+// Since Vercel Serverless Function maxDuration is 60s, any job still 'running'
+// after 90 seconds is guaranteed to have timed out or terminated.
+export const SYNC_JOB_LEASE_MS = 90 * 1000;
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -73,6 +83,69 @@ export async function batchProcess<T, R = void>(
 }
 
 export class MetaSyncEngine {
+  /**
+   * Scans for stale or orphaned RUNNING jobs whose execution lease has expired,
+   * transitions them to 'timeout', records diagnostic context, and safely unlocks the account.
+   */
+  public static async recoverStaleJobs(adAccountId?: string): Promise<StaleJobRecoveryResult> {
+    const leaseCutoff = new Date(Date.now() - SYNC_JOB_LEASE_MS);
+
+    // Find jobs that are 'running' but have exceeded the lease
+    const staleConditions: Array<Record<string, unknown>> = [
+      { startedAt: { lt: leaseCutoff } },
+      { startedAt: null, createdAt: { lt: leaseCutoff } },
+    ];
+
+    const whereClause: {
+      status: string;
+      OR: Array<Record<string, unknown>>;
+      adAccountId?: string;
+    } = {
+      status: 'running',
+      OR: staleConditions,
+    };
+
+    if (adAccountId) {
+      whereClause.adAccountId = normalizeAdAccountId(adAccountId);
+    }
+
+    try {
+      const staleJobs = await prisma.syncJob.findMany({
+        where: whereClause,
+        select: { id: true, startedAt: true, adAccountId: true, errorMessage: true },
+      });
+
+      if (staleJobs.length === 0) {
+        return { recoveredCount: 0, recoveredJobIds: [] };
+      }
+
+      const now = new Date();
+      for (const job of staleJobs) {
+        const lastStage = job.errorMessage ? ` [Giai đoạn dừng: ${job.errorMessage}]` : '';
+        await prisma.syncJob.update({
+          where: { id: job.id },
+          data: {
+            status: 'timeout',
+            finishedAt: now,
+            errorMessage: `Tiến trình bị gián đoạn do vượt quá thời hạn thực thi Serverless (${Math.round(
+              SYNC_JOB_LEASE_MS / 1000
+            )}s lease). Đã tự động thu hồi lock an toàn.${lastStage}`,
+          },
+        });
+      }
+
+      const recoveredJobIds = staleJobs.map(j => j.id);
+      console.log(`[MetaSyncEngine] Recovered ${recoveredJobIds.length} stale job(s): ${recoveredJobIds.join(', ')}`);
+      return {
+        recoveredCount: recoveredJobIds.length,
+        recoveredJobIds,
+      };
+    } catch (err: unknown) {
+      console.error('[MetaSyncEngine] Error during recoverStaleJobs:', err);
+      return { recoveredCount: 0, recoveredJobIds: [] };
+    }
+  }
+
   /**
    * Synchronizes advertising structure and daily ad-level insights
    * from Meta Marketing API into Neon PostgreSQL.
@@ -109,20 +182,30 @@ export class MetaSyncEngine {
       );
     }
 
-    // 4. Concurrency Protection & Account-Level Job Lock
-    const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
-    const existingRunningJob = await prisma.syncJob.findFirst({
+    // 4. Stale Job Recovery & Concurrency Protection (Bounded Lease Lock)
+    // 4a. First, automatically detect and recover any stale jobs for this account
+    await MetaSyncEngine.recoverStaleJobs(normalizedAccountId);
+
+    // 4b. Check for genuinely active running jobs within the lease duration
+    const leaseCutoff = new Date(Date.now() - SYNC_JOB_LEASE_MS);
+    const activeRunningJob = await prisma.syncJob.findFirst({
       where: {
         adAccountId: normalizedAccountId,
         status: 'running',
-        startedAt: { gte: fifteenMinutesAgo },
+        startedAt: { gte: leaseCutoff },
       },
+      orderBy: { startedAt: 'desc' },
     });
 
-    if (existingRunningJob && !options.force) {
+    if (activeRunningJob && !options.force) {
+      const elapsedSec = Math.round(
+        (Date.now() - (activeRunningJob.startedAt?.getTime() || Date.now())) / 1000
+      );
+      const remainingSec = Math.max(0, Math.round(SYNC_JOB_LEASE_MS / 1000) - elapsedSec);
       throw new Error(
-        `Một tiến trình đồng bộ khác cho tài khoản ${normalizedAccountId} đang chạy (Job ID: ${existingRunningJob.id}). ` +
-        `Vui lòng chờ tiến trình hoàn tất trước khi chạy lại.`
+        `Một tiến trình đồng bộ khác cho tài khoản ${normalizedAccountId} đang chạy ` +
+        `(Job ID: ${activeRunningJob.id.slice(0, 8)}, đã chạy ${elapsedSec}s). ` +
+        `Vui lòng chờ khoảng ${remainingSec}s để tiến trình hoàn tất hoặc tự động giải phóng lock.`
       );
     }
 
@@ -145,6 +228,7 @@ export class MetaSyncEngine {
         dateFrom: new Date(dateFrom + 'T00:00:00.000Z'),
         dateTo: new Date(dateTo + 'T23:59:59.999Z'),
         startedAt: new Date(),
+        errorMessage: '[Giai đoạn 1/4] Đang khởi tạo và kết nối Meta API...',
       },
     });
 
@@ -168,6 +252,14 @@ export class MetaSyncEngine {
           currency: accountInfo.currency,
           timezoneName: accountInfo.timezoneName,
           status: accountInfo.status || 'ACTIVE',
+        },
+      });
+
+      // Update progress stage
+      await prisma.syncJob.update({
+        where: { id: syncJob.id },
+        data: {
+          errorMessage: `[Giai đoạn 2/4] Đã nạp AdAccount ${accountInfo.accountName}. Đang lấy Chiến dịch...`,
         },
       });
 
@@ -211,6 +303,14 @@ export class MetaSyncEngine {
           },
         });
         campaignMap.set(c.id, dbCampaign.id);
+      });
+
+      // Update progress stage
+      await prisma.syncJob.update({
+        where: { id: syncJob.id },
+        data: {
+          errorMessage: `[Giai đoạn 3/4] Đã nạp ${campaigns.length} Chiến dịch. Đang lấy Nhóm QC & Mẫu QC...`,
+        },
       });
 
       // 8. Complete AdSet Pagination & Idempotent Upsert (Batched)
@@ -326,6 +426,14 @@ export class MetaSyncEngine {
         }
       });
 
+      // Update progress stage
+      await prisma.syncJob.update({
+        where: { id: syncJob.id },
+        data: {
+          errorMessage: `[Giai đoạn 4/4] Đã lưu ${campaigns.length} Chiến dịch, ${adsets.length} Nhóm QC, ${ads.length} Mẫu QC. Đang lấy Daily Insights...`,
+        },
+      });
+
       // 10. Complete Daily Ad-Level Insights Pagination & Idempotent Upsert (Batched)
       const insightsResult = await MetaApiService.getInsightsPaged(
         normalizedAccountId,
@@ -350,6 +458,14 @@ export class MetaSyncEngine {
         totalImpressions += parseInt(insight.impressions || '0', 10);
         totalClicks += parseInt(insight.clicks || '0', 10);
       }
+
+      // Update progress stage before batch database persistence
+      await prisma.syncJob.update({
+        where: { id: syncJob.id },
+        data: {
+          errorMessage: `[Giai đoạn 4/4] Đang ghi ${validInsights.length} bản ghi Daily Insights vào Neon PostgreSQL...`,
+        },
+      });
 
       // Batch upsert insights into database in chunks of 20
       await batchProcess(validInsights, 20, async (insight) => {
@@ -432,7 +548,19 @@ export class MetaSyncEngine {
         });
       });
 
-      // 11. Finalize SyncJob on Success
+      // 11. Expired Worker Protection: Ensure our job lease was not revoked or superseded
+      const currentJobState = await prisma.syncJob.findUnique({
+        where: { id: syncJob.id },
+        select: { status: true },
+      });
+
+      if (currentJobState && currentJobState.status !== 'running') {
+        throw new Error(
+          `Tiến trình (Job ID: ${syncJob.id}) đã hết hạn lease hoặc bị thu hồi lock (Trạng thái hiện tại: ${currentJobState.status}). Hủy thao tác ghi nhận hoàn tất.`
+        );
+      }
+
+      // Finalize SyncJob on Success
       await prisma.syncJob.update({
         where: { id: syncJob.id },
         data: {
@@ -476,21 +604,29 @@ export class MetaSyncEngine {
       console.error(`Meta Sync failed for ${normalizedAccountId}:`, error);
 
       // Record failure in SyncJob without wiping existing data
-      await prisma.syncJob.update({
-        where: { id: syncJob.id },
-        data: {
-          status: 'failed',
-          finishedAt: new Date(),
-          errorMessage: errorMsg,
-        },
-      });
+      try {
+        await prisma.syncJob.update({
+          where: { id: syncJob.id },
+          data: {
+            status: 'failed',
+            finishedAt: new Date(),
+            errorMessage: errorMsg,
+          },
+        });
+      } catch {
+        // Ignored if update fails
+      }
 
       // Check if token expired
       if (error instanceof MetaApiError && error.category === 'TOKEN_EXPIRED') {
-        await prisma.metaConnection.update({
-          where: { id: connection.id },
-          data: { status: 'error' },
-        });
+        try {
+          await prisma.metaConnection.update({
+            where: { id: connection.id },
+            data: { status: 'error' },
+          });
+        } catch {
+          // Ignored
+        }
       }
 
       throw error;
