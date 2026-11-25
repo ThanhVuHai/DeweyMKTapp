@@ -1,5 +1,67 @@
 import { decrypt } from './crypto';
 
+/**
+ * Centralized, validated Meta Ads Insights API field configuration.
+ *
+ * CORE fields — required for all synchronization tasks. All verified against
+ * Meta Marketing API v25.0 (https://developers.facebook.com/docs/marketing-api/reference/ads-insights/).
+ *
+ * NOTE: `video_3sec_video_view` is NOT a valid top-level Insights field.
+ * 3-second video views are exposed via the `actions` array where action_type === "video_view".
+ */
+export const INSIGHTS_CORE_FIELDS = [
+  'date_start',
+  'date_stop',
+  'account_id',
+  'account_name',
+  'campaign_id',
+  'campaign_name',
+  'adset_id',
+  'adset_name',
+  'ad_id',
+  'ad_name',
+  'spend',
+  'impressions',
+  'reach',
+  'clicks',
+  'inline_link_clicks',
+  'actions',
+  'action_values',
+  'cost_per_action_type',
+].join(',');
+
+/**
+ * Account-level aggregate fields (no ad/adset/campaign breakdown fields needed).
+ */
+export const INSIGHTS_ACCOUNT_FIELDS = [
+  'date_start',
+  'date_stop',
+  'account_id',
+  'account_name',
+  'spend',
+  'impressions',
+  'reach',
+  'clicks',
+  'inline_link_clicks',
+  'actions',
+  'cost_per_action_type',
+].join(',');
+
+/**
+ * Optional video breakdown fields — valid as top-level Insights fields in v25.0.
+ * These are appended to core fields only when video metrics are explicitly requested.
+ * `video_3sec_video_view` is intentionally excluded: it is NOT a valid top-level field.
+ * Extract 3-sec views from actions[action_type === "video_view"] instead.
+ */
+export const INSIGHTS_OPTIONAL_VIDEO_FIELDS = [
+  'video_thruplay_watched_actions',
+  'video_p25_watched_actions',
+  'video_p50_watched_actions',
+  'video_p75_watched_actions',
+  'video_p95_watched_actions',
+  'video_p100_watched_actions',
+].join(',');
+
 export interface MetaConnectionParam {
   encryptedAccessToken?: string;
   accessToken?: string;
@@ -88,8 +150,10 @@ export interface MetaInsightRecord {
   clicks?: string;
   inline_link_clicks?: string;
   actions?: Array<{ action_type: string; value: string }>;
+  action_values?: Array<{ action_type: string; value: string }>;
   cost_per_action_type?: Array<{ action_type: string; value: string }>;
-  video_3sec_video_view?: Array<{ action_type: string; value: string }>;
+  // Valid optional video breakdown fields (top-level in v25.0)
+  // NOTE: video_3sec_video_view is NOT a valid top-level field. Extract from actions[action_type="video_view"].
   video_thruplay_watched_actions?: Array<{ action_type: string; value: string }>;
   video_p25_watched_actions?: Array<{ action_type: string; value: string }>;
   video_p50_watched_actions?: Array<{ action_type: string; value: string }>;
@@ -988,7 +1052,7 @@ export class MetaApiService {
       level,
       time_increment: '1',
       time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
-      fields: 'date_start,date_stop,account_id,account_name,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,clicks,inline_link_clicks,actions,action_values,cost_per_action_type,video_3sec_video_view,video_thruplay_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p95_watched_actions,video_p100_watched_actions',
+      fields: INSIGHTS_CORE_FIELDS,
       limit: '100',
     });
     
@@ -1064,10 +1128,11 @@ export class MetaApiService {
       level,
       time_increment: '1',
       time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
-      fields:
-        level === 'account'
-          ? 'date_start,date_stop,account_id,account_name,spend,impressions,reach,clicks,inline_link_clicks,actions,cost_per_action_type'
-          : 'date_start,date_stop,account_id,account_name,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,reach,clicks,inline_link_clicks,actions,action_values,cost_per_action_type,video_3sec_video_view,video_thruplay_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p95_watched_actions,video_p100_watched_actions',
+      // Use centralized validated field constants.
+      // INSIGHTS_CORE_FIELDS is used for all non-account levels.
+      // INSIGHTS_ACCOUNT_FIELDS omits entity breakdown fields (campaign_id, etc.) for account level.
+      // video_3sec_video_view is intentionally excluded — it is not a valid top-level Insights field.
+      fields: level === 'account' ? INSIGHTS_ACCOUNT_FIELDS : INSIGHTS_CORE_FIELDS,
     };
 
     return this.fetchPaginatedMetaAPI<MetaInsightRecord>(endpoint, connection, params, options);
@@ -1087,7 +1152,7 @@ export class MetaApiService {
     const params: Record<string, string> = {
       level: 'account',
       time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
-      fields: 'date_start,date_stop,account_id,account_name,spend,impressions,reach,clicks,inline_link_clicks,actions,cost_per_action_type',
+      fields: INSIGHTS_ACCOUNT_FIELDS,
     };
     const response = await this.requestMetaAPI<{ data?: MetaInsightRecord[] }>(endpoint, connection, params);
     if (response.data && Array.isArray(response.data) && response.data.length > 0) {

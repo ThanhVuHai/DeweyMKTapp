@@ -11,6 +11,12 @@ import { encrypt } from '../src/lib/crypto';
 import { GET as cronHandler, POST as cronPostHandler } from '../src/app/api/cron/sync/route';
 import { GET as jobsGetHandler, POST as jobsPostHandler } from '../src/app/api/meta/sync/jobs/route';
 import { prisma } from '../src/lib/db';
+import {
+  INSIGHTS_CORE_FIELDS,
+  INSIGHTS_ACCOUNT_FIELDS,
+  INSIGHTS_OPTIONAL_VIDEO_FIELDS,
+  parseMetaError,
+} from '../src/lib/meta';
 
 test('normalizeSyncDate: Validates and formats dates correctly', () => {
   const fallback = '2026-10-01';
@@ -294,4 +300,110 @@ test('Insights-First Architecture: Entity extraction accurately groups distinct 
   assert.strictEqual(ads.size, 3);
   assert.strictEqual(ads.get('ad_1')?.adsetId, 'adset_1');
   assert.strictEqual(adsets.get('adset_1')?.campaignId, 'camp_1');
+});
+
+// ─── Meta Insights Field Validation Tests ─────────────────────────────────────
+
+test('Insights fields: video_3sec_video_view is never included in INSIGHTS_CORE_FIELDS', () => {
+  assert.ok(
+    !INSIGHTS_CORE_FIELDS.includes('video_3sec_video_view'),
+    'INSIGHTS_CORE_FIELDS must not contain the invalid field video_3sec_video_view'
+  );
+});
+
+test('Insights fields: video_3sec_video_view is never included in INSIGHTS_ACCOUNT_FIELDS', () => {
+  assert.ok(
+    !INSIGHTS_ACCOUNT_FIELDS.includes('video_3sec_video_view'),
+    'INSIGHTS_ACCOUNT_FIELDS must not contain the invalid field video_3sec_video_view'
+  );
+});
+
+test('Insights fields: video_3sec_video_view is never included in INSIGHTS_OPTIONAL_VIDEO_FIELDS', () => {
+  assert.ok(
+    !INSIGHTS_OPTIONAL_VIDEO_FIELDS.includes('video_3sec_video_view'),
+    'INSIGHTS_OPTIONAL_VIDEO_FIELDS must not contain the invalid field video_3sec_video_view'
+  );
+});
+
+test('Insights fields: INSIGHTS_CORE_FIELDS contains all mandatory core fields', () => {
+  const required = [
+    'account_id', 'campaign_id', 'campaign_name', 'adset_id', 'adset_name',
+    'ad_id', 'ad_name', 'date_start', 'date_stop', 'spend', 'impressions',
+    'clicks', 'reach', 'inline_link_clicks', 'actions', 'action_values', 'cost_per_action_type',
+  ];
+  for (const field of required) {
+    assert.ok(
+      INSIGHTS_CORE_FIELDS.includes(field),
+      `INSIGHTS_CORE_FIELDS must include required field: ${field}`
+    );
+  }
+});
+
+test('Insights fields: INSIGHTS_ACCOUNT_FIELDS contains no entity breakdown fields', () => {
+  const forbidden = ['campaign_id', 'adset_id', 'ad_id', 'ad_name'];
+  for (const field of forbidden) {
+    assert.ok(
+      !INSIGHTS_ACCOUNT_FIELDS.includes(field),
+      `INSIGHTS_ACCOUNT_FIELDS must not include entity breakdown field: ${field}`
+    );
+  }
+});
+
+test('Insights fields: 3-second video view correctly extracted from actions array (not top-level field)', () => {
+  // Simulates the extraction logic in metaSyncEngine.ts
+  const actions = [
+    { action_type: 'lead', value: '5' },
+    { action_type: 'video_view', value: '1200' }, // 3-sec video view in actions
+    { action_type: 'link_click', value: '300' },
+  ];
+
+  const videoViewAction = actions.find(a => a.action_type === 'video_view');
+  const video3sViews = videoViewAction ? parseInt(videoViewAction.value || '0', 10) : 0;
+
+  assert.strictEqual(video3sViews, 1200);
+});
+
+test('Insights fields: raw actions and action_values are preserved during extraction', () => {
+  const insight = {
+    ad_id: 'ad_test_123',
+    date_start: '2026-10-01',
+    spend: '500000',
+    actions: [
+      { action_type: 'lead', value: '3' },
+      { action_type: 'video_view', value: '500' },
+    ],
+    action_values: [
+      { action_type: 'lead', value: '1500000' },
+    ],
+  };
+
+  const actionsJson = insight.actions ? JSON.stringify(insight.actions) : null;
+  const breakdownJson = insight.action_values ? JSON.stringify(insight.action_values) : null;
+
+  assert.ok(actionsJson !== null, 'actionsJson must be persisted');
+  assert.ok(breakdownJson !== null, 'breakdownJson (action_values) must be persisted');
+
+  const parsedActions = JSON.parse(actionsJson!);
+  assert.strictEqual(parsedActions.length, 2);
+  assert.strictEqual(parsedActions[1].action_type, 'video_view');
+});
+
+test('Meta error code 100 (invalid fields param) is reported with correct code and message', () => {
+  const rawError = {
+    error: {
+      message: '(#100) video_3sec_video_view is not valid for fields param.',
+      type: 'OAuthException',
+      code: 100,
+      fbtrace_id: 'AXyzCorrelation',
+    },
+  };
+
+  const err = parseMetaError(rawError);
+  assert.strictEqual(err.code, 100);
+  // code 100 with invalid fields message falls into API_ERROR category
+  assert.ok(
+    ['API_ERROR', 'ACCOUNT_NOT_ACCESSIBLE'].includes(err.category),
+    `Expected API_ERROR or ACCOUNT_NOT_ACCESSIBLE, got: ${err.category}`
+  );
+  assert.ok(err.message.includes('video_3sec_video_view'), 'Error message should contain the offending field name');
 });

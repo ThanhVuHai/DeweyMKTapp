@@ -469,6 +469,16 @@ export class MetaSyncEngine {
           }
         }
 
+        // Extract 3-second video views from actions (action_type === "video_view").
+        // video_3sec_video_view is NOT a valid top-level Insights field; this is the correct extraction path.
+        let video3sViewsVal = 0;
+        if (Array.isArray(insight.actions)) {
+          const videoViewAction = insight.actions.find(a => a.action_type === 'video_view');
+          if (videoViewAction) {
+            video3sViewsVal = parseInt(videoViewAction.value || '0', 10);
+          }
+        }
+
         const actionsJson = insight.actions ? JSON.stringify(insight.actions) : null;
         const costPerActionTypeJson = insight.cost_per_action_type ? JSON.stringify(insight.cost_per_action_type) : null;
         const breakdownJson = insight.action_values ? JSON.stringify(insight.action_values) : null;
@@ -498,6 +508,7 @@ export class MetaSyncEngine {
             cpm: impVal > 0 ? (spendVal / impVal) * 1000 : 0,
             leads: leadsVal,
             costPerLead: leadsVal > 0 ? spendVal / leadsVal : 0,
+            video3sViews: video3sViewsVal,
             actionsJson,
             costPerActionTypeJson,
             breakdownJson,
@@ -523,6 +534,7 @@ export class MetaSyncEngine {
             cpm: impVal > 0 ? (spendVal / impVal) * 1000 : 0,
             leads: leadsVal,
             costPerLead: leadsVal > 0 ? spendVal / leadsVal : 0,
+            video3sViews: video3sViewsVal,
             actionsJson,
             costPerActionTypeJson,
             breakdownJson,
