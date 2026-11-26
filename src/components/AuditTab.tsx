@@ -100,6 +100,7 @@ export default function AuditTab({ triggerRefresh }: AuditTabProps) {
 
   // Migration State
   const [migrationNeeded, setMigrationNeeded] = React.useState(false);
+  const [migrationDisabled, setMigrationDisabled] = React.useState(false);
   const [migrating, setMigrating] = React.useState(false);
   const [migrationMessage, setMigrationMessage] = React.useState<{ text: string; success: boolean } | null>(null);
 
@@ -117,8 +118,11 @@ export default function AuditTab({ triggerRefresh }: AuditTabProps) {
       const data = await res.json();
       if (res.ok && data.success) {
         setMigrationNeeded(false);
+        setMigrationDisabled(true);
         setMigrationMessage({
-          text: `Migration thành công! Cấu trúc SyncLog đã sẵn sàng và toàn vẹn dữ liệu được bảo toàn (GIS Hà Nội: ${data.postMigration?.gisHanoiInsightsCount} insights, ${data.postMigration?.gisHanoiStoredSpend?.toLocaleString()} VND).`,
+          text: data.alreadyApplied
+            ? 'Bảng SyncLog đã sẵn sàng. Runtime migration execution đã được vô hiệu hóa để bảo đảm an toàn.'
+            : `Migration thành công! Cấu trúc SyncLog đã sẵn sàng và toàn vẹn dữ liệu được bảo toàn (GIS Hà Nội: ${data.postMigration?.gisHanoiInsightsCount} insights, ${data.postMigration?.gisHanoiStoredSpend?.toLocaleString()} VND). Runtime migration đã được khóa.`,
           success: true,
         });
         setRefreshTick(t => t + 1);
@@ -284,15 +288,17 @@ export default function AuditTab({ triggerRefresh }: AuditTabProps) {
 
         {/* Refresh & Count & Migration Button */}
         <div className="flex items-center gap-3">
-          <button
-            onClick={handleRunMigration}
-            disabled={migrating}
-            className="flex items-center gap-1.5 text-xs bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 px-3 py-1.5 rounded-xl transition-all disabled:opacity-50"
-            title="Áp dụng additive migration SyncLog trên Neon Preview"
-          >
-            <Database className={`w-3.5 h-3.5 ${migrating ? 'animate-spin' : ''}`} />
-            {migrating ? 'Đang migration...' : 'Chạy Migration SyncLog'}
-          </button>
+          {!migrationDisabled && (
+            <button
+              onClick={handleRunMigration}
+              disabled={migrating}
+              className="flex items-center gap-1.5 text-xs bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 px-3 py-1.5 rounded-xl transition-all disabled:opacity-50"
+              title="Áp dụng additive migration SyncLog trên Neon Preview"
+            >
+              <Database className={`w-3.5 h-3.5 ${migrating ? 'animate-spin' : ''}`} />
+              {migrating ? 'Đang migration...' : 'Chạy Migration SyncLog'}
+            </button>
+          )}
           <span className="text-3xs font-mono text-slate-400 bg-slate-800/60 px-3 py-1.5 rounded-full border border-slate-700/50">
             {pagination.total} bản ghi ghi nhận
           </span>

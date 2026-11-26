@@ -174,3 +174,60 @@ test('Additive Migration API: Rejects unauthenticated requests with HTTP 401', a
   const data = await res.json();
   assert.strictEqual(data.error.includes('Chưa đăng nhập'), true);
 });
+
+test('Additive Migration API: Rejects execution on Production environment with HTTP 403', async () => {
+  const originalVercelEnv = process.env.VERCEL_ENV;
+  process.env.VERCEL_ENV = 'production';
+
+  try {
+    const authReq = new Request('http://localhost:3000/api/system/migrate', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${SINGLE_USER_PASSWORD}` },
+    });
+    const res = await migrateHandler(authReq);
+
+    assert.strictEqual(res.status, 403);
+    const data = await res.json();
+    assert.strictEqual(data.errorCode, 'PRODUCTION_MIGRATION_FORBIDDEN');
+  } finally {
+    process.env.VERCEL_ENV = originalVercelEnv;
+  }
+});
+
+test('Additive Migration API: Rejects execution when runtime migration is disabled with HTTP 403', async () => {
+  const originalDisable = process.env.DISABLE_RUNTIME_MIGRATION;
+  process.env.DISABLE_RUNTIME_MIGRATION = 'true';
+
+  try {
+    const authReq = new Request('http://localhost:3000/api/system/migrate', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${SINGLE_USER_PASSWORD}` },
+    });
+    const res = await migrateHandler(authReq);
+
+    assert.strictEqual(res.status, 403);
+    const data = await res.json();
+    assert.strictEqual(data.errorCode, 'RUNTIME_MIGRATION_DISABLED');
+  } finally {
+    process.env.DISABLE_RUNTIME_MIGRATION = originalDisable;
+  }
+});
+
+test('Additive Migration API: Rejects execution when database isolation status is NOT PASS with HTTP 403', async () => {
+  const originalExpected = process.env.EXPECTED_NEON_ENDPOINT_ID;
+  process.env.EXPECTED_NEON_ENDPOINT_ID = 'ep-wrong-expected-endpoint';
+
+  try {
+    const authReq = new Request('http://localhost:3000/api/system/migrate', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${SINGLE_USER_PASSWORD}` },
+    });
+    const res = await migrateHandler(authReq);
+
+    assert.strictEqual(res.status, 403);
+    const data = await res.json();
+    assert.strictEqual(data.errorCode, 'DATABASE_ISOLATION_FAILED');
+  } finally {
+    process.env.EXPECTED_NEON_ENDPOINT_ID = originalExpected;
+  }
+});

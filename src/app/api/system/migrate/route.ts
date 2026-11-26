@@ -18,7 +18,32 @@ export async function POST(request: Request) {
       );
     }
 
-    // 2. Strict Database Isolation Preflight (Preview branch protection)
+    // 2. Strict Preview Environment Guard (Never allow on Production)
+    const vercelEnv = process.env.VERCEL_ENV;
+    if (vercelEnv === 'production') {
+      return NextResponse.json(
+        {
+          success: false,
+          errorCode: 'PRODUCTION_MIGRATION_FORBIDDEN',
+          message: 'Cấm thực thi: Endpoint migration chỉ được phép chạy trên Preview, tuyệt đối không được chạy trên Production.',
+        },
+        { status: 403 }
+      );
+    }
+
+    // 3. Runtime Migration Disabled Guard
+    if (process.env.DISABLE_RUNTIME_MIGRATION === 'true') {
+      return NextResponse.json(
+        {
+          success: false,
+          errorCode: 'RUNTIME_MIGRATION_DISABLED',
+          message: 'Runtime migration execution đã bị vô hiệu hóa.',
+        },
+        { status: 403 }
+      );
+    }
+
+    // 4. Strict Database Isolation Preflight (Preview branch protection)
     const isolation = verifyDatabaseIsolation();
     if (isolation.status !== 'PASS') {
       return NextResponse.json(
@@ -34,7 +59,7 @@ export async function POST(request: Request) {
 
     assertDatabaseIsolation();
 
-    // 3. Pre-Migration Baseline Verification
+    // 5. Pre-Migration Baseline Verification
     const targetAccountId = 'act_1380498158917028';
     const targetDateStart = new Date('2026-10-01T00:00:00.000Z');
     const targetDateEnd = new Date('2026-10-01T23:59:59.999Z');
@@ -64,6 +89,23 @@ export async function POST(request: Request) {
       ) as exists;
     `;
     const syncLogAlreadyExists = tableCheck[0]?.exists || false;
+
+    // 6. Disable runtime execution if already migrated
+    if (syncLogAlreadyExists && process.env.ENABLE_RUNTIME_MIGRATION !== 'true') {
+      return NextResponse.json({
+        success: true,
+        alreadyApplied: true,
+        runtimeExecutionDisabled: true,
+        message: 'Bảng SyncLog đã tồn tại và migration đã hoàn tất. Runtime migration execution đã được vô hiệu hóa để bảo đảm an toàn cơ sở dữ liệu.',
+        postMigration: {
+          syncLogExists: true,
+          gisHanoiInsightsCount: preInsightsCount,
+          gisHanoiStoredSpend: Math.round(preStoredSpend),
+          auditLogCount: preAuditLogCount,
+        },
+        dataIntegrityVerified: true,
+      });
+    }
 
     // 4. Execute Additive DDL Migration
     // Idempotent execution of Enums, SyncLog table, and performance indexes
