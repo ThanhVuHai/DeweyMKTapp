@@ -17,6 +17,7 @@ import {
   Activity,
   UserCheck,
   Terminal,
+  Database,
 } from 'lucide-react';
 
 interface AuditTabProps {
@@ -97,6 +98,46 @@ export default function AuditTab({ triggerRefresh }: AuditTabProps) {
   const [expandedLogId, setExpandedLogId] = React.useState<string | null>(null);
   const [copiedId, setCopiedId] = React.useState<string | null>(null);
 
+  // Migration State
+  const [migrationNeeded, setMigrationNeeded] = React.useState(false);
+  const [migrating, setMigrating] = React.useState(false);
+  const [migrationMessage, setMigrationMessage] = React.useState<{ text: string; success: boolean } | null>(null);
+
+  const handleRunMigration = async () => {
+    if (!window.confirm('Xác nhận áp dụng additive migration SyncLog trên Neon Preview? Thao tác này an toàn, tuân thủ DB isolation và không thay đổi dữ liệu hiện có.')) {
+      return;
+    }
+    setMigrating(true);
+    setMigrationMessage(null);
+    try {
+      const res = await fetch('/api/system/migrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setMigrationNeeded(false);
+        setMigrationMessage({
+          text: `Migration thành công! Cấu trúc SyncLog đã sẵn sàng và toàn vẹn dữ liệu được bảo toàn (GIS Hà Nội: ${data.postMigration?.gisHanoiInsightsCount} insights, ${data.postMigration?.gisHanoiStoredSpend?.toLocaleString()} VND).`,
+          success: true,
+        });
+        setRefreshTick(t => t + 1);
+      } else {
+        setMigrationMessage({
+          text: `Lỗi áp dụng migration: ${data.message || data.error || 'Thất bại'}`,
+          success: false,
+        });
+      }
+    } catch (err: unknown) {
+      setMigrationMessage({
+        text: `Lỗi kết nối khi gọi migration API: ${(err as Error).message}`,
+        success: false,
+      });
+    } finally {
+      setMigrating(false);
+    }
+  };
+
   React.useEffect(() => {
     let isCancelled = false;
 
@@ -130,6 +171,9 @@ export default function AuditTab({ triggerRefresh }: AuditTabProps) {
           setLogs(data.logs || []);
           if (data.pagination) {
             setPagination(data.pagination);
+          }
+          if (data.migrationNeeded) {
+            setMigrationNeeded(true);
           }
         }
       } catch (err: unknown) {
@@ -238,8 +282,17 @@ export default function AuditTab({ triggerRefresh }: AuditTabProps) {
           </p>
         </div>
 
-        {/* Refresh & Count */}
+        {/* Refresh & Count & Migration Button */}
         <div className="flex items-center gap-3">
+          <button
+            onClick={handleRunMigration}
+            disabled={migrating}
+            className="flex items-center gap-1.5 text-xs bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 px-3 py-1.5 rounded-xl transition-all disabled:opacity-50"
+            title="Áp dụng additive migration SyncLog trên Neon Preview"
+          >
+            <Database className={`w-3.5 h-3.5 ${migrating ? 'animate-spin' : ''}`} />
+            {migrating ? 'Đang migration...' : 'Chạy Migration SyncLog'}
+          </button>
           <span className="text-3xs font-mono text-slate-400 bg-slate-800/60 px-3 py-1.5 rounded-full border border-slate-700/50">
             {pagination.total} bản ghi ghi nhận
           </span>
@@ -254,6 +307,51 @@ export default function AuditTab({ triggerRefresh }: AuditTabProps) {
           </button>
         </div>
       </div>
+
+      {/* Migration Message or Warning Banner */}
+      {migrationMessage && (
+        <div
+          className={`p-3.5 rounded-xl border text-xs flex items-center justify-between ${
+            migrationMessage.success
+              ? 'bg-emerald-950/40 border-emerald-700/50 text-emerald-200'
+              : 'bg-rose-950/40 border-rose-700/50 text-rose-200'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {migrationMessage.success ? (
+              <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+            )}
+            <span>{migrationMessage.text}</span>
+          </div>
+          <button
+            onClick={() => setMigrationMessage(null)}
+            className="text-3xs text-slate-400 hover:text-slate-200 ml-3"
+          >
+            Đóng
+          </button>
+        </div>
+      )}
+
+      {migrationNeeded && !migrationMessage && (
+        <div className="p-3.5 rounded-xl border border-amber-600/40 bg-amber-950/30 text-amber-200 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              Bảng <strong>SyncLog</strong> chưa được khởi tạo trên Neon PostgreSQL. Vui lòng bấm &ldquo;Chạy Migration SyncLog&rdquo; để kích hoạt tính năng lưu vết hoạt động đồng bộ.
+            </span>
+          </div>
+          <button
+            onClick={handleRunMigration}
+            disabled={migrating}
+            className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-semibold shrink-0 transition-all flex items-center gap-1.5"
+          >
+            <Database className="w-3.5 h-3.5" />
+            {migrating ? 'Đang xử lý...' : 'Áp dụng Migration ngay'}
+          </button>
+        </div>
+      )}
 
       {/* Segmented Control / Tabs */}
       <div className="flex flex-wrap gap-2 p-1.5 bg-slate-950/40 rounded-2xl border border-slate-800/80">

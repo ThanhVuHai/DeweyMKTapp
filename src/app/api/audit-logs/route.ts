@@ -67,15 +67,26 @@ export async function GET(request: Request) {
         ];
       }
 
-      const [total, rawLogs] = await Promise.all([
-        prisma.syncLog.count({ where }),
-        prisma.syncLog.findMany({
-          where,
-          orderBy: { createdAt: 'desc' },
-          skip,
-          take: limit,
-        }),
-      ]);
+      let total = 0;
+      let rawLogs: Array<Prisma.SyncLogGetPayload<Record<string, never>>> = [];
+      let migrationNeeded = false;
+
+      try {
+        const [cnt, logs] = await Promise.all([
+          prisma.syncLog.count({ where }),
+          prisma.syncLog.findMany({
+            where,
+            orderBy: { createdAt: 'desc' },
+            skip,
+            take: limit,
+          }),
+        ]);
+        total = cnt;
+        rawLogs = logs;
+      } catch (err: unknown) {
+        console.warn('SyncLog table unavailable, migration may be needed:', err);
+        migrationNeeded = true;
+      }
 
       const logs = rawLogs.map(l => ({
         ...l,
@@ -85,6 +96,7 @@ export async function GET(request: Request) {
       return NextResponse.json({
         success: true,
         tab,
+        migrationNeeded,
         logs,
         pagination: {
           page,
@@ -212,24 +224,39 @@ export async function GET(request: Request) {
     const includeAudit = !severity || severity === 'INFO';
     const includeSync = !moduleFilter || moduleFilter !== 'USER_ACTION';
 
-    const [syncCount, auditCount] = await Promise.all([
-      includeSync ? prisma.syncLog.count({ where: syncWhere }) : 0,
-      includeAudit ? prisma.auditLog.count({ where: auditWhere }) : 0,
-    ]);
+    let syncCount = 0;
+    let auditCount = 0;
+    let rawSync: Array<Prisma.SyncLogGetPayload<Record<string, never>>> = [];
+    let rawAudit: Array<Prisma.AuditLogGetPayload<{ include: { user: { select: { name: true; email: true; role: true } } } }>> = [];
+    let migrationNeeded = false;
+
+    if (includeAudit) {
+      auditCount = await prisma.auditLog.count({ where: auditWhere });
+    }
+    if (includeSync) {
+      try {
+        syncCount = await prisma.syncLog.count({ where: syncWhere });
+      } catch {
+        migrationNeeded = true;
+        syncCount = 0;
+      }
+    }
 
     const total = syncCount + auditCount;
 
     // Fetch up to skip + limit from both sources, merge, sort, slice
     const fetchLimit = Math.min(skip + limit, 200);
 
-    const [rawSync, rawAudit] = await Promise.all([
-      includeSync
-        ? prisma.syncLog.findMany({
-            where: syncWhere,
-            orderBy: { createdAt: 'desc' },
-            take: fetchLimit,
-          })
-        : [],
+    const [syncResults, auditResults] = await Promise.all([
+      includeSync && !migrationNeeded
+        ? prisma.syncLog
+            .findMany({
+              where: syncWhere,
+              orderBy: { createdAt: 'desc' },
+              take: fetchLimit,
+            })
+            .catch(() => [])
+        : Promise.resolve([]),
       includeAudit
         ? prisma.auditLog.findMany({
             where: auditWhere,
@@ -241,8 +268,10 @@ export async function GET(request: Request) {
               },
             },
           })
-        : [],
+        : Promise.resolve([]),
     ]);
+    rawSync = syncResults as Array<Prisma.SyncLogGetPayload<Record<string, never>>>;
+    rawAudit = auditResults;
 
     const unifiedList = [
       ...rawSync.map(s => ({
