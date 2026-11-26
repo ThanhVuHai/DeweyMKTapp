@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { verifyAuth } from '@/lib/auth';
 import { MetaSyncEngine } from '@/lib/sync/metaSyncEngine';
+import { recordUserAction } from '@/lib/audit';
 
 export const dynamic = 'force-dynamic';
 
@@ -116,10 +117,21 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => ({}));
     const recoveryResult = await MetaSyncEngine.recoverStaleJobs(body.adAccountId);
 
+    // Record user action
+    await recordUserAction({
+      userId: auth.user?.id || null,
+      actorEmail: auth.user?.email || 'admin',
+      action: 'RECOVER_STALE_LOCKS_REQUESTED',
+      entityType: 'SyncJob',
+      entityId: body.adAccountId || 'ALL_ACCOUNTS',
+      after: recoveryResult,
+    });
+
     return NextResponse.json({
       success: true,
-      message: `Đã kiểm tra và thu hồi ${recoveryResult.recoveredCount} tiến trình quá hạn.`,
-      data: recoveryResult,
+      message: `Đã kiểm tra và thu hồi ${recoveryResult.recoveredCount} tiến trình quá hạn lease.`,
+      recoveredCount: recoveryResult.recoveredCount,
+      recoveredJobIds: recoveryResult.recoveredJobIds,
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : 'Unknown error';

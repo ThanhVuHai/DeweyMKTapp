@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { encrypt, maskToken } from '@/lib/crypto';
 import { verifyAuth } from '@/lib/auth';
 import { MetaApiService, MetaApiError, isMockToken } from '@/lib/meta';
+import { recordUserAction } from '@/lib/audit';
 import type { Prisma } from '@prisma/client';
 
 // PATCH: Update connection details
@@ -78,20 +79,26 @@ export async function PATCH(
     });
 
     // Write audit log
-    try {
-      const userId = auth.user?.id && auth.user.id !== 'admin' ? auth.user.id : null;
-      await prisma.auditLog.create({
-        data: {
-          userId,
-          action: 'UPDATE_CONNECTION',
-          entityType: 'META_CONNECTION',
-          entityId: id,
-          afterJson: JSON.stringify({ connectionName, graphApiVersion, syncFrequency }),
-        },
-      });
-    } catch {
-      // Audit log optional
-    }
+    const actorEmail = auth.user?.email || 'admin';
+    const userId = auth.user?.id && auth.user.id !== 'admin' ? auth.user.id : null;
+    await recordUserAction({
+      userId,
+      actorEmail,
+      action: accessToken ? 'REPLACE_TOKEN_AND_UPDATE_CONNECTION' : 'UPDATE_CONNECTION',
+      entityType: 'MetaConnection',
+      entityId: id,
+      before: {
+        connectionName: existingConnection.connectionName,
+        graphApiVersion: existingConnection.graphApiVersion,
+        syncFrequency: existingConnection.syncFrequency,
+      },
+      after: {
+        connectionName: updated.connectionName,
+        graphApiVersion: updated.graphApiVersion,
+        syncFrequency: updated.syncFrequency,
+        tokenUpdated: !!accessToken,
+      },
+    });
 
     const decrypted = MetaApiService.getDecryptedToken(updated);
     const isMock = isMockToken(decrypted);
@@ -156,20 +163,16 @@ export async function DELETE(
     });
 
     // Write audit log
-    try {
-      const userId = auth.user?.id && auth.user.id !== 'admin' ? auth.user.id : null;
-      await prisma.auditLog.create({
-        data: {
-          userId,
-          action: 'DELETE_CONNECTION',
-          entityType: 'META_CONNECTION',
-          entityId: id,
-          beforeJson: JSON.stringify({ name: existingConnection.connectionName }),
-        },
-      });
-    } catch {
-      // Audit log optional
-    }
+    const actorEmail = auth.user?.email || 'admin';
+    const userId = auth.user?.id && auth.user.id !== 'admin' ? auth.user.id : null;
+    await recordUserAction({
+      userId,
+      actorEmail,
+      action: 'DELETE_CONNECTION',
+      entityType: 'MetaConnection',
+      entityId: id,
+      before: { name: existingConnection.connectionName },
+    });
 
     return NextResponse.json({ success: true, message: 'Connection removed successfully' });
   } catch (error: unknown) {

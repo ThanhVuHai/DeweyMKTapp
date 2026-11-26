@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { verifyAuth } from '@/lib/auth';
 import { MetaApiService, MetaApiError, normalizeAdAccountId } from '@/lib/meta';
+import { recordUserAction } from '@/lib/audit';
 
 // POST: Manually link an Ad Account by ID
 export async function POST(
@@ -80,6 +81,21 @@ export async function POST(
         },
       });
 
+      // Record user action
+      await recordUserAction({
+        userId: auth.user?.id !== 'admin' ? auth.user?.id : null,
+        actorEmail: auth.user?.email || 'admin',
+        action: 'AD_ACCOUNT_LINKED',
+        entityType: 'AdAccount',
+        entityId: adAccount.accountId,
+        after: {
+          accountName: adAccount.accountName,
+          currency: adAccount.currency,
+          timezoneName: adAccount.timezoneName,
+          metaConnectionId: connection.id,
+        },
+      });
+
       return NextResponse.json({
         success: true,
         message: `Đã xác thực và liên kết tài khoản quảng cáo "${adAccount.accountName}" (${adAccount.accountId}) thành công!`,
@@ -114,6 +130,14 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await verifyAuth(request);
+    if (!auth.authenticated) {
+      return NextResponse.json(
+        { error: 'Chưa đăng nhập. Vui lòng đăng nhập lại.' },
+        { status: 401 }
+      );
+    }
+
     const { id } = await params;
     const { searchParams } = new URL(request.url);
     const accountId = searchParams.get('accountId');
@@ -141,6 +165,19 @@ export async function DELETE(
 
     await prisma.adAccount.delete({
       where: { id: existingAccount.id },
+    });
+
+    // Record user action
+    await recordUserAction({
+      userId: auth.user?.id !== 'admin' ? auth.user?.id : null,
+      actorEmail: auth.user?.email || 'admin',
+      action: 'AD_ACCOUNT_UNLINKED',
+      entityType: 'AdAccount',
+      entityId: accountId,
+      before: {
+        accountName: existingAccount.accountName,
+        metaConnectionId: id,
+      },
     });
 
     return NextResponse.json({

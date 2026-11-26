@@ -186,6 +186,7 @@ export interface MetaPaginationOptions {
   retryOptions?: {
     maxRetries?: number;
     baseDelayMs?: number;
+    onRetry?: (attempt: number, error: unknown, delayMs: number) => void;
   };
 }
 
@@ -218,27 +219,36 @@ export type MetaErrorCategory =
 export class MetaApiError extends Error {
   public code?: number;
   public subcode?: number;
+  public isTransient?: boolean;
+  public fbtraceId?: string;
   public category: MetaErrorCategory;
   public userMessage: string;
   public technicalDetails?: string;
+  public raw?: unknown;
 
   constructor(
     message: string,
     options?: {
       code?: number;
       subcode?: number;
+      isTransient?: boolean;
+      fbtraceId?: string;
       category?: MetaErrorCategory;
       userMessage?: string;
       technicalDetails?: string;
+      raw?: unknown;
     }
   ) {
     super(message);
     this.name = 'MetaApiError';
     this.code = options?.code;
     this.subcode = options?.subcode;
+    this.isTransient = options?.isTransient;
+    this.fbtraceId = options?.fbtraceId;
     this.category = options?.category || 'API_ERROR';
     this.userMessage = options?.userMessage || message;
     this.technicalDetails = options?.technicalDetails || message;
+    this.raw = options?.raw;
   }
 }
 
@@ -273,11 +283,13 @@ export function isMockToken(token: string): boolean {
  * with actionable Vietnamese instructions for the user.
  */
 export function parseMetaError(errorData: unknown): MetaApiError {
-  const err = (errorData as { error?: { code?: number; error_subcode?: number; message?: string } })?.error ||
-    (errorData as { code?: number; error_subcode?: number; message?: string }) ||
+  const err = (errorData as { error?: { code?: number; error_subcode?: number; message?: string; is_transient?: boolean; fbtrace_id?: string } })?.error ||
+    (errorData as { code?: number; error_subcode?: number; message?: string; is_transient?: boolean; fbtrace_id?: string }) ||
     {};
   const code = err.code;
   const subcode = err.error_subcode;
+  const isTransient = err.is_transient;
+  const fbtraceId = err.fbtrace_id;
   const rawMsg = err.message || 'Meta API request failed';
 
   // 1. Token Expired / Invalid
@@ -292,6 +304,9 @@ export function parseMetaError(errorData: unknown): MetaApiError {
     return new MetaApiError(rawMsg, {
       code,
       subcode,
+      isTransient,
+      fbtraceId,
+      raw: errorData,
       category: 'TOKEN_EXPIRED',
       userMessage: 'Access Token đã hết hạn hoặc không hợp lệ. Vui lòng tạo Token mới từ Meta for Developers và cập nhật lại cấu hình kết nối.',
       technicalDetails: `Meta OAuthException (code ${code}, subcode ${subcode}): ${rawMsg}`,
@@ -303,6 +318,9 @@ export function parseMetaError(errorData: unknown): MetaApiError {
     return new MetaApiError(rawMsg, {
       code: code || 100,
       subcode,
+      isTransient,
+      fbtraceId,
+      raw: errorData,
       category: 'MISSING_BUSINESS_MANAGEMENT',
       userMessage: 'Yêu cầu quyền business_management để đọc thông tin Business Manager. Với tính năng đọc và phân tích quảng cáo cơ bản, hệ thống chỉ cần quyền ads_read.',
       technicalDetails: `Meta Permission Error (code ${code}): ${rawMsg}`,
@@ -320,6 +338,9 @@ export function parseMetaError(errorData: unknown): MetaApiError {
     return new MetaApiError(rawMsg, {
       code,
       subcode,
+      isTransient,
+      fbtraceId,
+      raw: errorData,
       category: 'MISSING_ADS_READ',
       userMessage: 'Token thiếu quyền ads_read. Vui lòng cấp quyền ads_read cho token trong Meta for Developers hoặc Meta App để truy cập dữ liệu quảng cáo.',
       technicalDetails: `Meta Permission Error (code ${code}): ${rawMsg}`,
@@ -336,6 +357,9 @@ export function parseMetaError(errorData: unknown): MetaApiError {
     return new MetaApiError(rawMsg, {
       code,
       subcode,
+      isTransient,
+      fbtraceId,
+      raw: errorData,
       category: 'ACCOUNT_NOT_ACCESSIBLE',
       userMessage: 'Không tìm thấy hoặc Token không có quyền truy cập Ad Account này. Vui lòng kiểm tra lại Ad Account ID (dạng act_xxxxxxxx) và phân quyền của bạn trong Trình quản lý quảng cáo.',
       technicalDetails: `Meta Account Access Error (code ${code}): ${rawMsg}`,
@@ -347,6 +371,9 @@ export function parseMetaError(errorData: unknown): MetaApiError {
     return new MetaApiError(rawMsg, {
       code,
       subcode,
+      isTransient,
+      fbtraceId,
+      raw: errorData,
       category: 'RATE_LIMIT',
       userMessage: 'Đã vượt quá giới hạn tần suất gọi Meta API (Rate Limit). Vui lòng thử lại sau vài phút.',
       technicalDetails: `Meta Rate Limit (code ${code}): ${rawMsg}`,
@@ -356,6 +383,9 @@ export function parseMetaError(errorData: unknown): MetaApiError {
   return new MetaApiError(rawMsg, {
     code,
     subcode,
+    isTransient,
+    fbtraceId,
+    raw: errorData,
     category: 'API_ERROR',
     userMessage: `Lỗi kết nối Meta API: ${rawMsg}`,
     technicalDetails: `Meta API Error [${code}:${subcode}]: ${rawMsg}`,
@@ -449,7 +479,11 @@ export class MetaApiService {
     endpoint: string,
     connection: MetaConnectionParam,
     params: Record<string, string> = {},
-    options: { maxRetries?: number; baseDelayMs?: number } = {}
+    options: {
+      maxRetries?: number;
+      baseDelayMs?: number;
+      onRetry?: (attempt: number, error: unknown, delayMs: number) => void;
+    } = {}
   ): Promise<T> {
     const maxRetries = options.maxRetries ?? 3;
     const baseDelayMs = options.baseDelayMs ?? 200;
@@ -476,6 +510,13 @@ export class MetaApiService {
         // Jittered exponential backoff: 200ms, 400ms, 800ms...
         const jitter = Math.floor(Math.random() * 50);
         const delay = baseDelayMs * Math.pow(2, attempt - 1) + jitter;
+        if (options.onRetry) {
+          try {
+            options.onRetry(attempt, error, delay);
+          } catch {
+            // Ignore callback errors
+          }
+        }
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }

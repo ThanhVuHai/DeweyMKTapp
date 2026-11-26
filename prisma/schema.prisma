@@ -290,4 +290,58 @@ model AuditLog {
   beforeJson  String?
   afterJson   String?
   createdAt   DateTime @default(now())
+
+  @@index([createdAt])
 }
+
+enum LogLevel {
+  INFO
+  WARN
+  ERROR
+  DEBUG
+  CRITICAL
+}
+
+enum LogModule {
+  SYSTEM
+  META_API
+  META_CONNECTION
+  SYNC_ENGINE
+  DATABASE
+  USER_ACTION
+}
+
+model SyncLog {
+  id                String     @id @default(uuid())
+  severity          LogLevel   @default(INFO)
+  module            LogModule  @default(SYSTEM)
+  eventType         String
+  message           String
+  actor             String?
+  environment       String?
+  commitSha         String?
+  adAccountId       String?
+  reportingDateFrom DateTime?
+  reportingDateTo   DateTime?
+  syncJobId         String?
+  correlationId     String?
+  stage             String?
+  durationMs        Int?
+  recordCount       Int?
+  retryAttempt      Int?
+  httpStatus        Int?
+  metaErrorCode     Int?
+  metaErrorSubcode  Int?
+  metaIsTransient   Boolean?
+  metaFbtraceId     String?
+  metaErrorMessage  String?
+  sanitizedMeta     Json?
+  createdAt         DateTime   @default(now())
+
+  @@index([createdAt])
+  @@index([syncJobId])
+  @@index([correlationId])
+  @@index([adAccountId, createdAt])
+  @@index([severity, module])
+}
+

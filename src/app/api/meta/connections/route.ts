@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { encrypt, maskToken } from '@/lib/crypto';
 import { normalizeAdAccountId, MetaApiService, isMockToken } from '@/lib/meta';
 import { verifyAuth, getOrCreateSingleUser } from '@/lib/auth';
+import { recordUserAction } from '@/lib/audit';
 import { Prisma } from '@prisma/client';
 
 // GET: List all connections
@@ -128,19 +129,14 @@ export async function POST(request: Request) {
     }
 
     // Write audit log
-    try {
-      await prisma.auditLog.create({
-        data: {
-          userId,
-          action: 'CREATE_CONNECTION',
-          entityType: 'MetaConnection',
-          entityId: connection.id,
-          afterJson: JSON.stringify({ connectionName }),
-        },
-      });
-    } catch {
-      // Audit log optional
-    }
+    await recordUserAction({
+      userId,
+      actorEmail: auth.user?.email || ownerUser.email,
+      action: 'CREATE_CONNECTION',
+      entityType: 'MetaConnection',
+      entityId: connection.id,
+      after: { connectionName, graphApiVersion, syncFrequency, adAccountId: adAccountId || null },
+    });
 
     return NextResponse.json({
       success: true,

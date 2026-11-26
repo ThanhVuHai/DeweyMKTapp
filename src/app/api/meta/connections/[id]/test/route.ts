@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { verifyAuth } from '@/lib/auth';
 import { MetaApiService, MetaApiError, isMockToken } from '@/lib/meta';
+import { recordUserAction } from '@/lib/audit';
 
 export async function POST(
   request: Request,
@@ -43,6 +44,21 @@ export async function POST(
           data: {
             status: 'connected',
             lastTestedAt: new Date(),
+          },
+        });
+
+        // Record user action for token validation
+        await recordUserAction({
+          userId: auth.user?.id !== 'admin' ? auth.user?.id : null,
+          actorEmail: auth.user?.email || 'admin',
+          action: 'TOKEN_VALIDATION_REQUESTED',
+          entityType: 'MetaConnection',
+          entityId: connection.id,
+          after: {
+            valid: true,
+            hasAdsRead: tokenInfo.hasAdsRead,
+            hasBusinessManagement: tokenInfo.hasBusinessManagement,
+            userName: tokenInfo.userName,
           },
         });
 
