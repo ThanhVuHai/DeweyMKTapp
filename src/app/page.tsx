@@ -71,13 +71,35 @@ export default function DashboardPage() {
   const [accountsList, setAccountsList] = React.useState<AdAccountOption[]>([]);
 
   // Sync Now Modal state
+  interface DailyChunkData {
+    date: string;
+    status: 'SUCCESS' | 'FAILED' | 'UNPROCESSED';
+    insightsCount: number;
+    spend: number;
+    impressions: number;
+    clicks: number;
+    durationMs: number;
+    error?: string;
+  }
+
   interface SyncResultData {
     success: boolean;
+    status?: 'SUCCESS' | 'PARTIAL' | 'FAILED';
     jobId: string;
     jobType: string;
     adAccountId: string;
     accountName: string;
     dateRange: { since: string; until: string };
+    datesSummary?: {
+      totalDates: number;
+      successfulCount: number;
+      failedCount: number;
+      unprocessedCount: number;
+      successfulDates: string[];
+      failedDates: Array<{ date: string; error: string; metaErrorCode?: number }>;
+      unprocessedDates: string[];
+    };
+    chunks?: DailyChunkData[];
     counts: {
       campaignsUpserted: number;
       adsetsUpserted: number;
@@ -91,6 +113,7 @@ export default function DashboardPage() {
     };
     timings?: Record<string, number>;
     executionTimeMs: number;
+    error?: string;
   }
   const [showSyncModal, setShowSyncModal] = React.useState(false);
   const [syncModalAccount, setSyncModalAccount] = React.useState('act_1380498158917028');
@@ -789,17 +812,94 @@ export default function DashboardPage() {
 
               {/* Sync Result Details */}
               {syncResultData && (
-                <div className="p-4 bg-slate-950/60 rounded-2xl border border-emerald-500/30 space-y-3">
+                <div
+                  className={`p-4 rounded-2xl border space-y-3 ${
+                    syncResultData.status === 'SUCCESS' || (!syncResultData.status && syncResultData.success)
+                      ? 'bg-slate-950/60 border-emerald-500/30'
+                      : syncResultData.status === 'PARTIAL'
+                      ? 'bg-slate-950/60 border-amber-500/30'
+                      : 'bg-slate-950/60 border-rose-500/30'
+                  }`}
+                >
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-2 text-emerald-400 font-bold text-xs">
-                      <CheckCircle2 className="w-4 h-4" />
-                      <span>Đồng bộ thành công! (Job ID: {syncResultData.jobId.slice(0, 8)})</span>
+                    <div className="flex items-center space-x-2 font-bold text-xs">
+                      {syncResultData.status === 'SUCCESS' || (!syncResultData.status && syncResultData.success) ? (
+                        <>
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                          <span className="text-emerald-400">
+                            Đồng bộ thành công! (Tất cả {syncResultData.datesSummary?.totalDates || 1} ngày hoàn tất)
+                          </span>
+                        </>
+                      ) : syncResultData.status === 'PARTIAL' ? (
+                        <>
+                          <AlertTriangle className="w-4 h-4 text-amber-400" />
+                          <span className="text-amber-400">
+                            Đồng bộ một phần (PARTIAL) — {syncResultData.datesSummary?.successfulCount}/{syncResultData.datesSummary?.totalDates} ngày thành công
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <AlertTriangle className="w-4 h-4 text-rose-400" />
+                          <span className="text-rose-400">
+                            Đồng bộ thất bại (FAILED) — 0/{syncResultData.datesSummary?.totalDates || 1} ngày thành công
+                          </span>
+                        </>
+                      )}
                     </div>
                     <span className="text-4xs text-slate-500 font-mono">
-                      {syncResultData.executionTimeMs}ms
-                      {syncResultData.timings?.insightsFetchMs ? ` (API: ${syncResultData.timings.insightsFetchMs}ms, DB: ${(syncResultData.timings.entitiesPersistenceMs || 0) + (syncResultData.timings.insightsPersistenceMs || 0)}ms)` : ''}
+                      Job: {syncResultData.jobId.slice(0, 8)} • {syncResultData.executionTimeMs}ms
                     </span>
                   </div>
+
+                  {/* Daily Chunks Breakdown */}
+                  {syncResultData.chunks && syncResultData.chunks.length > 0 && (
+                    <div className="space-y-1.5 pt-1">
+                      <div className="text-4xs font-bold uppercase text-slate-400 tracking-wider flex items-center justify-between">
+                        <span>Chi tiết các ngày (Date Chunks)</span>
+                        <span className="text-slate-500 font-normal">
+                          {syncResultData.datesSummary?.successfulCount || 0} thành công • {syncResultData.datesSummary?.failedCount || 0} lỗi • {syncResultData.datesSummary?.unprocessedCount || 0} chưa xử lý
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-48 overflow-y-auto pr-1">
+                        {syncResultData.chunks.map(chunk => (
+                          <div
+                            key={chunk.date}
+                            className={`p-2 rounded-lg border text-4xs flex items-center justify-between ${
+                              chunk.status === 'SUCCESS'
+                                ? 'bg-emerald-950/20 border-emerald-500/20 text-emerald-300'
+                                : chunk.status === 'FAILED'
+                                ? 'bg-rose-950/20 border-rose-500/20 text-rose-300'
+                                : 'bg-slate-900/40 border-slate-700/30 text-slate-400'
+                            }`}
+                          >
+                            <div className="flex items-center space-x-1.5">
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  chunk.status === 'SUCCESS'
+                                    ? 'bg-emerald-400'
+                                    : chunk.status === 'FAILED'
+                                    ? 'bg-rose-400'
+                                    : 'bg-slate-500'
+                                }`}
+                              />
+                              <span className="font-mono font-bold">{chunk.date}</span>
+                            </div>
+                            <div className="text-right">
+                              {chunk.status === 'SUCCESS' ? (
+                                <span>{chunk.insightsCount} QC • {formatVNDFull(chunk.spend)}</span>
+                              ) : chunk.status === 'FAILED' ? (
+                                <span className="text-rose-400 truncate max-w-[150px] inline-block" title={chunk.error}>
+                                  {chunk.error || 'Lỗi truy vấn'}
+                                </span>
+                              ) : (
+                                <span className="text-slate-500">Chưa xử lý (Quỹ thời gian)</span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-3xs">
                     <div className="bg-slate-900/60 p-2 rounded-lg border border-slate-850">

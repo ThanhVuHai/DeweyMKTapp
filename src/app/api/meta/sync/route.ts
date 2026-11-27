@@ -162,7 +162,7 @@ export async function POST(request: Request) {
       );
     }
 
-    // 6. Execute Synchronization via MetaSyncEngine
+    // 6. Execute Synchronization via MetaSyncEngine with Date Chunking
     const syncResult = await MetaSyncEngine.syncAdAccount(connection, {
       adAccountId: targetAccountId,
       dateFrom,
@@ -173,12 +173,28 @@ export async function POST(request: Request) {
       actor: actorEmail,
     });
 
-    return NextResponse.json({
-      success: true,
-      correlationId,
-      message: `Đồng bộ dữ liệu Meta thành công cho tài khoản ${syncResult.accountName}!`,
-      data: syncResult,
-    });
+    const isFullSuccess = syncResult.status === 'SUCCESS';
+    const isPartial = syncResult.status === 'PARTIAL';
+
+    let message = '';
+    if (isFullSuccess) {
+      message = `Đồng bộ dữ liệu Meta thành công cho tài khoản ${syncResult.accountName}! (${syncResult.datesSummary.successfulCount}/${syncResult.datesSummary.totalDates} ngày)`;
+    } else if (isPartial) {
+      message = `Đồng bộ một phần cho tài khoản ${syncResult.accountName}: ${syncResult.datesSummary.successfulCount} ngày thành công, ${syncResult.datesSummary.failedCount} ngày lỗi, ${syncResult.datesSummary.unprocessedCount} ngày chưa xử lý.`;
+    } else {
+      message = `Đồng bộ thất bại: 0/${syncResult.datesSummary.totalDates} ngày thành công.${syncResult.error ? ` Lỗi: ${syncResult.error}` : ''}`;
+    }
+
+    return NextResponse.json(
+      {
+        success: isFullSuccess || isPartial,
+        status: syncResult.status,
+        correlationId,
+        message,
+        data: syncResult,
+      },
+      { status: syncResult.status === 'FAILED' ? 400 : 200 }
+    );
   } catch (error: unknown) {
     if (error instanceof MetaApiError) {
       return NextResponse.json(

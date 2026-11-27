@@ -20,13 +20,46 @@ export interface SyncOptions {
   actor?: string;
 }
 
+export interface DailyChunkResult {
+  date: string;
+  status: 'SUCCESS' | 'FAILED' | 'UNPROCESSED';
+  insightsCount: number;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  durationMs: number;
+  error?: string;
+  metaErrorCode?: number;
+  metaErrorSubcode?: number;
+  metaFbtraceId?: string;
+}
+
+export interface DatesSummary {
+  totalDates: number;
+  successfulCount: number;
+  failedCount: number;
+  unprocessedCount: number;
+  successfulDates: string[];
+  failedDates: Array<{
+    date: string;
+    error: string;
+    metaErrorCode?: number;
+    metaErrorSubcode?: number;
+    metaFbtraceId?: string;
+  }>;
+  unprocessedDates: string[];
+}
+
 export interface SyncResult {
   success: boolean;
+  status: 'SUCCESS' | 'PARTIAL' | 'FAILED';
   jobId: string;
   jobType: string;
   adAccountId: string;
   accountName: string;
   dateRange: { since: string; until: string };
+  datesSummary: DatesSummary;
+  chunks: DailyChunkResult[];
   counts: {
     campaignsUpserted: number;
     adsetsUpserted: number;
@@ -55,6 +88,12 @@ export const ENABLED_ACCOUNTS_FOR_SYNC = ['act_1380498158917028', '1380498158917
 // Matches 300s maxDuration with safe 30s buffer.
 export const SYNC_JOB_LEASE_MS = 330 * 1000;
 
+// Maximum execution duration allowance before graceful shutdown (280s out of 300s maxDuration).
+export const FUNCTION_TIMEOUT_MS = 280 * 1000;
+
+// Safety execution budget required to safely process another daily chunk (25 seconds).
+export const SAFETY_BUDGET_REMAINING_MS = 25 * 1000;
+
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
@@ -65,6 +104,28 @@ export function normalizeSyncDate(dateStr: string | undefined | null, fallbackDa
   const trimmed = dateStr.trim();
   if (!DATE_REGEX.test(trimmed)) return fallbackDate;
   return trimmed;
+}
+
+/**
+ * Splits a date range [dateFrom, dateTo] into an array of individual dates (YYYY-MM-DD).
+ * Ordered chronologically from start to end.
+ */
+export function splitDateRangeToDays(dateFrom: string, dateTo: string): string[] {
+  const dates: string[] = [];
+  const start = new Date(dateFrom + 'T00:00:00.000Z');
+  const end = new Date(dateTo + 'T00:00:00.000Z');
+
+  if (isNaN(start.getTime()) || isNaN(end.getTime()) || start > end) {
+    return [dateFrom];
+  }
+
+  const curr = new Date(start);
+  while (curr <= end) {
+    dates.push(curr.toISOString().split('T')[0]);
+    curr.setUTCDate(curr.getUTCDate() + 1);
+  }
+
+  return dates;
 }
 
 /**
@@ -368,444 +429,498 @@ export class MetaSyncEngine {
       timings['adAccountSyncMs'] = Date.now() - tAccountStart;
       console.log(`[MetaSyncEngine:Stage] AdAccount ${accountInfo.accountName} upserted in ${timings['adAccountSyncMs']}ms`);
 
-      // Update progress
-      await prisma.syncJob.update({
-        where: { id: syncJob.id },
-        data: {
-          errorMessage: `[Giai đoạn 2/5] Đang tải Daily Insights từ Meta API (${dateFrom} đến ${dateTo})...`,
-        },
-      });
+      // 7. Date Chunking: Sequential Daily Chunk Processing
+      const requestedDates = splitDateRangeToDays(dateFrom, dateTo);
+      const totalDates = requestedDates.length;
+      const accountTimezone = accountInfo.timezoneName || dbAdAccount.timezoneName || 'Asia/Ho_Chi_Minh';
 
-      // Event 6: Meta API request started
-      await Logger.info(
-        'META_API',
-        'MetaRequestStarted',
-        `Bắt đầu truy vấn Daily Insights cho tài khoản ${normalizedAccountId} qua Meta Marketing API`,
-        ctx,
-        {
-          stage: 'meta_insights_request',
-          actor,
-          metadata: { level: 'ad', dateFrom, dateTo, maxPages: options.maxPages || 100 },
-        }
-      );
+      const successfulDates: string[] = [];
+      const failedDates: Array<{
+        date: string;
+        error: string;
+        metaErrorCode?: number;
+        metaErrorSubcode?: number;
+        metaFbtraceId?: string;
+      }> = [];
+      const unprocessedDates: string[] = [];
+      const chunkResults: DailyChunkResult[] = [];
 
-      // 7. Insights-First: Retrieve Daily Ad-Level Insights for requested date range
-      const tInsightsFetchStart = Date.now();
-      let retryCount = 0;
-
-      const insightsResult = await MetaApiService.getInsightsPaged(
-        normalizedAccountId,
-        connection,
-        'ad',
-        dateFrom,
-        dateTo,
-        {
-          limit: 100,
-          maxPages: options.maxPages || 100,
-          retryOptions: {
-            onRetry: (attempt, err, delayMs) => {
-              retryCount++;
-              // Event 10: Existing retry attempts
-              Logger.warn(
-                'META_API',
-                'MetaRequestRetry',
-                `Thử lại lần ${attempt} khi gọi Meta API sau ${delayMs}ms`,
-                ctx,
-                {
-                  stage: 'meta_api_retry',
-                  retryAttempt: attempt,
-                  durationMs: delayMs,
-                  metaError: err instanceof MetaApiError ? {
-                    code: err.code,
-                    subcode: err.subcode,
-                    isTransient: err.isTransient,
-                    fbtraceId: err.fbtraceId,
-                    message: err.userMessage || err.message,
-                  } : undefined,
-                }
-              );
-            },
-          },
-        }
-      );
-
-      const rawInsights = insightsResult.data;
-      timings['insightsFetchMs'] = Date.now() - tInsightsFetchStart;
-
-      // Event 7: Meta API request completed
-      await Logger.info(
-        'META_API',
-        'MetaRequestCompleted',
-        `Truy vấn Meta API hoàn tất trong ${timings['insightsFetchMs']}ms (${rawInsights.length} bản ghi, ${insightsResult.pagesFetched} trang)`,
-        ctx,
-        {
-          stage: 'meta_insights_request',
-          durationMs: timings['insightsFetchMs'],
-          recordCount: rawInsights.length,
-          retryAttempt: retryCount,
-          actor,
-        }
-      );
-
-      // Event 9: Pagination progress and completion
-      await Logger.info(
-        'META_API',
-        'PaginationCompleted',
-        `Hoàn thành phân trang Meta API: ${insightsResult.pagesFetched} trang, ${rawInsights.length} bản ghi`,
-        ctx,
-        {
-          stage: 'pagination',
-          recordCount: rawInsights.length,
-          metadata: {
-            pagesFetched: insightsResult.pagesFetched,
-            hasMore: insightsResult.hasMore,
-          },
-        }
-      );
-
-      console.log(
-        `[MetaSyncEngine:Timing] Retrieved ${rawInsights.length} raw insight records across ` +
-        `${insightsResult.pagesFetched} page(s) in ${timings['insightsFetchMs']}ms`
-      );
-
-      // Filter valid insights with ad_id and date_start
-      const validInsights = rawInsights.filter(i => i.ad_id && i.date_start);
-
-      // Event 11: Insights retrieved
-      await Logger.info(
-        'SYNC_ENGINE',
-        'InsightsRetrieved',
-        `Đã tiếp nhận ${validInsights.length} bản ghi Daily Insights hợp lệ`,
-        ctx,
-        {
-          stage: 'insights_retrieval',
-          recordCount: validInsights.length,
-          metadata: { totalRaw: rawInsights.length, totalValid: validInsights.length },
-        }
-      );
-
-      // 8. Extract Distinct Active Entities from Insights Data
-      const tExtractStart = Date.now();
+      // Global entity tracking across all chunks
       const distinctCampaigns = new Map<string, { id: string; name: string }>();
       const distinctAdSets = new Map<string, { id: string; name: string; campaignId?: string }>();
       const distinctAds = new Map<string, { id: string; name: string; adsetId?: string; campaignId?: string }>();
+      const campaignDbIdMap = new Map<string, string>();
+      const adsetDbIdMap = new Map<string, string>();
 
-      let totalSpend = 0;
-      let totalImpressions = 0;
-      let totalClicks = 0;
+      let grandTotalInsights = 0;
+      let grandTotalSpend = 0;
+      let grandTotalImpressions = 0;
+      let grandTotalClicks = 0;
 
-      for (const i of validInsights) {
-        totalSpend += parseFloat(i.spend || '0');
-        totalImpressions += parseInt(i.impressions || '0', 10);
-        totalClicks += parseInt(i.clicks || '0', 10);
+      for (let chunkIdx = 0; chunkIdx < requestedDates.length; chunkIdx++) {
+        const currentDate = requestedDates[chunkIdx];
+        const chunkStartTime = Date.now();
+        const currentElapsedMs = chunkStartTime - startTime;
 
-        if (i.campaign_id) {
-          distinctCampaigns.set(i.campaign_id, {
-            id: i.campaign_id,
-            name: i.campaign_name || `Campaign ${i.campaign_id}`,
-          });
+        // A. Execution Budget Safety Check (Stop safely when remaining budget < 25s)
+        if (FUNCTION_TIMEOUT_MS - currentElapsedMs < SAFETY_BUDGET_REMAINING_MS) {
+          const remaining = requestedDates.slice(chunkIdx);
+          for (const unDate of remaining) {
+            unprocessedDates.push(unDate);
+            chunkResults.push({
+              date: unDate,
+              status: 'UNPROCESSED',
+              insightsCount: 0,
+              spend: 0,
+              impressions: 0,
+              clicks: 0,
+              durationMs: 0,
+              error: 'Ngừng an toàn: Quỹ thời gian Serverless còn lại không đủ để thực thi ngày này.',
+            });
+          }
+
+          await Logger.warn(
+            'SYNC_ENGINE',
+            'ExecutionBudgetExceeded',
+            `Dừng xử lý an toàn: Quỹ thời gian còn lại (${Math.round((FUNCTION_TIMEOUT_MS - currentElapsedMs) / 1000)}s) ` +
+            `nhỏ hơn ngưỡng an toàn (${Math.round(SAFETY_BUDGET_REMAINING_MS / 1000)}s). Bỏ qua ${remaining.length} ngày chưa xử lý: ${remaining.join(', ')}`,
+            ctx,
+            {
+              stage: 'budget_guard',
+              actor,
+              metadata: { elapsedMs: currentElapsedMs, remainingDates: remaining },
+            }
+          );
+          break;
         }
-        if (i.adset_id) {
-          distinctAdSets.set(i.adset_id, {
-            id: i.adset_id,
-            name: i.adset_name || `AdSet ${i.adset_id}`,
-            campaignId: i.campaign_id,
+
+        // B. Update live progress on SyncJob
+        await prisma.syncJob.update({
+          where: { id: syncJob.id },
+          data: {
+            errorMessage: `[Giai đoạn 3/5] Đang xử lý ngày ${currentDate} (${chunkIdx + 1}/${totalDates}). ` +
+              `Đã xong: ${successfulDates.length} ngày, lỗi: ${failedDates.length} ngày...`,
+          },
+        });
+
+        // C. Log DailyChunkStarted
+        await Logger.info(
+          'SYNC_ENGINE',
+          'DailyChunkStarted',
+          `Bắt đầu đồng bộ Daily Chunk ngày ${currentDate} (${chunkIdx + 1}/${totalDates}) cho tài khoản ${normalizedAccountId}`,
+          ctx,
+          {
+            stage: 'daily_chunk_fetch',
+            actor,
+            metadata: {
+              reportingDate: currentDate,
+              chunkIndex: chunkIdx + 1,
+              totalDates,
+              timezone: accountTimezone,
+            },
+          }
+        );
+
+        try {
+          // D. Fetch Daily Insights for currentDate with pagination and retry
+          let chunkRetryCount = 0;
+          const tInsightsFetchStart = Date.now();
+
+          const insightsResult = await MetaApiService.getInsightsPaged(
+            normalizedAccountId,
+            connection,
+            'ad',
+            currentDate,
+            currentDate,
+            {
+              limit: 100,
+              maxPages: options.maxPages || 100,
+              retryOptions: {
+                onRetry: (attempt, err, delayMs) => {
+                  chunkRetryCount++;
+                  Logger.warn(
+                    'META_API',
+                    'MetaRequestRetry',
+                    `[${currentDate}] Thử lại lần ${attempt} khi gọi Meta API sau ${delayMs}ms: ${(err as Error).message}`,
+                    ctx,
+                    {
+                      stage: 'meta_api_retry',
+                      retryAttempt: attempt,
+                      durationMs: delayMs,
+                      metadata: { reportingDate: currentDate },
+                      metaError: err instanceof MetaApiError ? {
+                        code: err.code,
+                        subcode: err.subcode,
+                        isTransient: err.isTransient,
+                        fbtraceId: err.fbtraceId,
+                        message: err.userMessage || err.message,
+                      } : undefined,
+                    }
+                  );
+                },
+              },
+            }
+          );
+
+          const rawInsights = insightsResult.data;
+          const insightsFetchDuration = Date.now() - tInsightsFetchStart;
+          timings[`insightsFetch_${currentDate}`] = insightsFetchDuration;
+
+          const validInsights = rawInsights.filter(i => i.ad_id && i.date_start);
+
+          // E. Distinguish empty day from failure
+          if (validInsights.length === 0) {
+            const chunkDuration = Date.now() - chunkStartTime;
+            successfulDates.push(currentDate);
+            chunkResults.push({
+              date: currentDate,
+              status: 'SUCCESS',
+              insightsCount: 0,
+              spend: 0,
+              impressions: 0,
+              clicks: 0,
+              durationMs: chunkDuration,
+            });
+
+            await Logger.info(
+              'SYNC_ENGINE',
+              'DailyChunkCompleted',
+              `Hoàn tất Daily Chunk ngày ${currentDate} (Không có dữ liệu quảng cáo phát sinh trong ngày, 0 insights, 0 VND, ${chunkDuration}ms)`,
+              ctx,
+              {
+                stage: 'daily_chunk_persist',
+                durationMs: chunkDuration,
+                recordCount: 0,
+                retryAttempt: chunkRetryCount,
+                actor,
+                metadata: {
+                  reportingDate: currentDate,
+                  pagesFetched: insightsResult.pagesFetched,
+                  spend: 0,
+                  isEmptyDay: true,
+                  retries: chunkRetryCount,
+                },
+              }
+            );
+            continue;
+          }
+
+          // F. Extract Entities for this Chunk
+          let chunkSpend = 0;
+          let chunkImpressions = 0;
+          let chunkClicks = 0;
+          const chunkCampaigns = new Map<string, { id: string; name: string }>();
+          const chunkAdSets = new Map<string, { id: string; name: string; campaignId?: string }>();
+          const chunkAds = new Map<string, { id: string; name: string; adsetId?: string; campaignId?: string }>();
+
+          for (const i of validInsights) {
+            chunkSpend += parseFloat(i.spend || '0');
+            chunkImpressions += parseInt(i.impressions || '0', 10);
+            chunkClicks += parseInt(i.clicks || '0', 10);
+
+            if (i.campaign_id) {
+              const camp = { id: i.campaign_id, name: i.campaign_name || `Campaign ${i.campaign_id}` };
+              chunkCampaigns.set(i.campaign_id, camp);
+              distinctCampaigns.set(i.campaign_id, camp);
+            }
+            if (i.adset_id) {
+              const as = { id: i.adset_id, name: i.adset_name || `AdSet ${i.adset_id}`, campaignId: i.campaign_id };
+              chunkAdSets.set(i.adset_id, as);
+              distinctAdSets.set(i.adset_id, as);
+            }
+            if (i.ad_id) {
+              const ad = { id: i.ad_id, name: i.ad_name || `Ad ${i.ad_id}`, adsetId: i.adset_id, campaignId: i.campaign_id };
+              chunkAds.set(i.ad_id, ad);
+              distinctAds.set(i.ad_id, ad);
+            }
+          }
+
+          grandTotalSpend += chunkSpend;
+          grandTotalImpressions += chunkImpressions;
+          grandTotalClicks += chunkClicks;
+          grandTotalInsights += validInsights.length;
+
+          // G. Upsert Campaigns for Chunk (Batched)
+          const campaignList = Array.from(chunkCampaigns.values());
+          await batchProcess(campaignList, 10, async (c) => {
+            const dbCampaign = await prisma.campaign.upsert({
+              where: { campaignId: c.id },
+              update: { campaignName: c.name },
+              create: {
+                adAccountId: dbAdAccount.id,
+                campaignId: c.id,
+                campaignName: c.name,
+                status: 'ACTIVE',
+                effectiveStatus: 'ACTIVE',
+              },
+            });
+            campaignDbIdMap.set(c.id, dbCampaign.id);
           });
-        }
-        if (i.ad_id) {
-          distinctAds.set(i.ad_id, {
-            id: i.ad_id,
-            name: i.ad_name || `Ad ${i.ad_id}`,
-            adsetId: i.adset_id,
-            campaignId: i.campaign_id,
+
+          // H. Upsert AdSets for Chunk (Batched)
+          const adsetList = Array.from(chunkAdSets.values());
+          await batchProcess(adsetList, 15, async (as) => {
+            let parentCampaignDbId = as.campaignId ? campaignDbIdMap.get(as.campaignId) : undefined;
+            if (!parentCampaignDbId && as.campaignId) {
+              const placeholder = await prisma.campaign.create({
+                data: {
+                  adAccountId: dbAdAccount.id,
+                  campaignId: as.campaignId,
+                  campaignName: `Campaign ${as.campaignId}`,
+                  status: 'UNKNOWN',
+                  effectiveStatus: 'UNKNOWN',
+                },
+              });
+              parentCampaignDbId = placeholder.id;
+              campaignDbIdMap.set(as.campaignId, placeholder.id);
+            }
+            if (parentCampaignDbId) {
+              const dbAdSet = await prisma.adSet.upsert({
+                where: { adsetId: as.id },
+                update: { adsetName: as.name },
+                create: {
+                  adAccountId: dbAdAccount.id,
+                  campaignId: parentCampaignDbId,
+                  adsetId: as.id,
+                  adsetName: as.name,
+                  status: 'ACTIVE',
+                  effectiveStatus: 'ACTIVE',
+                },
+              });
+              adsetDbIdMap.set(as.id, dbAdSet.id);
+            }
           });
+
+          // I. Upsert Ads for Chunk (Batched)
+          const adList = Array.from(chunkAds.values());
+          await batchProcess(adList, 20, async (ad) => {
+            const parentCampaignDbId = ad.campaignId ? campaignDbIdMap.get(ad.campaignId) : undefined;
+            const parentAdSetDbId = ad.adsetId ? adsetDbIdMap.get(ad.adsetId) : undefined;
+            if (parentCampaignDbId && parentAdSetDbId) {
+              await prisma.ad.upsert({
+                where: { adId: ad.id },
+                update: { adName: ad.name },
+                create: {
+                  adAccountId: dbAdAccount.id,
+                  campaignId: parentCampaignDbId,
+                  adsetId: parentAdSetDbId,
+                  adId: ad.id,
+                  adName: ad.name,
+                  status: 'ACTIVE',
+                  effectiveStatus: 'ACTIVE',
+                },
+              });
+            }
+          });
+
+          // J. Upsert InsightsDaily for Chunk (Batched)
+          await batchProcess(validInsights, 20, async (insight) => {
+            const dateObj = new Date(insight.date_start + 'T00:00:00.000Z');
+            const spendVal = parseFloat(insight.spend || '0');
+            const impVal = parseInt(insight.impressions || '0', 10);
+            const clicksVal = parseInt(insight.clicks || '0', 10);
+            const reachVal = parseInt(insight.reach || '0', 10);
+            const linkClicksVal = parseInt(insight.inline_link_clicks || '0', 10);
+
+            let leadsVal = 0;
+            if (Array.isArray(insight.actions)) {
+              const leadAction = insight.actions.find(
+                a => a.action_type === 'lead' || a.action_type === 'onsite_conversion.lead_grouped'
+              );
+              if (leadAction) {
+                leadsVal = parseInt(leadAction.value || '0', 10);
+              }
+            }
+
+            let video3sViewsVal = 0;
+            if (Array.isArray(insight.actions)) {
+              const videoViewAction = insight.actions.find(a => a.action_type === 'video_view');
+              if (videoViewAction) {
+                video3sViewsVal = parseInt(videoViewAction.value || '0', 10);
+              }
+            }
+
+            const actionsJson = insight.actions ? JSON.stringify(insight.actions) : null;
+            const costPerActionTypeJson = insight.cost_per_action_type ? JSON.stringify(insight.cost_per_action_type) : null;
+            const breakdownJson = insight.action_values ? JSON.stringify(insight.action_values) : null;
+
+            await prisma.insightsDaily.upsert({
+              where: {
+                date_level_adId: {
+                  date: dateObj,
+                  level: 'ad',
+                  adId: insight.ad_id!,
+                },
+              },
+              update: {
+                campaignId: insight.campaign_id || '',
+                campaignName: insight.campaign_name || '',
+                adsetId: insight.adset_id || '',
+                adsetName: insight.adset_name || '',
+                adName: insight.ad_name || '',
+                spend: spendVal,
+                impressions: impVal,
+                reach: reachVal,
+                frequency: reachVal > 0 ? impVal / reachVal : 1.0,
+                clicks: clicksVal,
+                linkClicks: linkClicksVal,
+                ctr: impVal > 0 ? (clicksVal / impVal) * 100 : 0,
+                cpc: clicksVal > 0 ? spendVal / clicksVal : 0,
+                cpm: impVal > 0 ? (spendVal / impVal) * 1000 : 0,
+                leads: leadsVal,
+                costPerLead: leadsVal > 0 ? spendVal / leadsVal : 0,
+                video3sViews: video3sViewsVal,
+                actionsJson,
+                costPerActionTypeJson,
+                breakdownJson,
+              },
+              create: {
+                date: dateObj,
+                adAccountId: dbAdAccount.id,
+                campaignId: insight.campaign_id || '',
+                campaignName: insight.campaign_name || '',
+                adsetId: insight.adset_id || '',
+                adsetName: insight.adset_name || '',
+                adId: insight.ad_id!,
+                adName: insight.ad_name || '',
+                level: 'ad',
+                spend: spendVal,
+                impressions: impVal,
+                reach: reachVal,
+                frequency: reachVal > 0 ? impVal / reachVal : 1.0,
+                clicks: clicksVal,
+                linkClicks: linkClicksVal,
+                ctr: impVal > 0 ? (clicksVal / impVal) * 100 : 0,
+                cpc: clicksVal > 0 ? spendVal / clicksVal : 0,
+                cpm: impVal > 0 ? (spendVal / impVal) * 1000 : 0,
+                leads: leadsVal,
+                costPerLead: leadsVal > 0 ? spendVal / leadsVal : 0,
+                video3sViews: video3sViewsVal,
+                actionsJson,
+                costPerActionTypeJson,
+                breakdownJson,
+              },
+            });
+          });
+
+          const chunkDuration = Date.now() - chunkStartTime;
+          successfulDates.push(currentDate);
+          chunkResults.push({
+            date: currentDate,
+            status: 'SUCCESS',
+            insightsCount: validInsights.length,
+            spend: Math.round(chunkSpend),
+            impressions: chunkImpressions,
+            clicks: chunkClicks,
+            durationMs: chunkDuration,
+          });
+
+          // K. Log DailyChunkCompleted
+          await Logger.info(
+            'SYNC_ENGINE',
+            'DailyChunkCompleted',
+            `Hoàn tất Daily Chunk ngày ${currentDate}: ${validInsights.length} insights, chi tiêu: ${Math.round(chunkSpend).toLocaleString()} VND (${chunkDuration}ms)`,
+            ctx,
+            {
+              stage: 'daily_chunk_persist',
+              durationMs: chunkDuration,
+              recordCount: validInsights.length,
+              retryAttempt: chunkRetryCount,
+              actor,
+              metadata: {
+                reportingDate: currentDate,
+                spend: Math.round(chunkSpend),
+                impressions: chunkImpressions,
+                clicks: chunkClicks,
+                campaignsInChunk: chunkCampaigns.size,
+                adsInChunk: chunkAds.size,
+                retries: chunkRetryCount,
+              },
+            }
+          );
+        } catch (chunkErr: unknown) {
+          const chunkDuration = Date.now() - chunkStartTime;
+          const chunkErrMsg = chunkErr instanceof Error ? chunkErr.message : 'Unknown chunk error';
+          const isMetaErr = chunkErr instanceof MetaApiError;
+          const metaCode = isMetaErr ? chunkErr.code : undefined;
+          const metaSubcode = isMetaErr ? chunkErr.subcode : undefined;
+          const fbtraceId = isMetaErr ? chunkErr.fbtraceId : undefined;
+
+          failedDates.push({
+            date: currentDate,
+            error: chunkErrMsg,
+            metaErrorCode: typeof metaCode === 'number' ? metaCode : undefined,
+            metaErrorSubcode: typeof metaSubcode === 'number' ? metaSubcode : undefined,
+            metaFbtraceId: fbtraceId,
+          });
+
+          chunkResults.push({
+            date: currentDate,
+            status: 'FAILED',
+            insightsCount: 0,
+            spend: 0,
+            impressions: 0,
+            clicks: 0,
+            durationMs: chunkDuration,
+            error: chunkErrMsg,
+            metaErrorCode: typeof metaCode === 'number' ? metaCode : undefined,
+            metaErrorSubcode: typeof metaSubcode === 'number' ? metaSubcode : undefined,
+            metaFbtraceId: fbtraceId,
+          });
+
+          // Log DailyChunkFailed
+          await Logger.error(
+            'SYNC_ENGINE',
+            'DailyChunkFailed',
+            `Thất bại khi đồng bộ Daily Chunk ngày ${currentDate}: ${chunkErrMsg}`,
+            ctx,
+            {
+              stage: 'daily_chunk_failure',
+              durationMs: chunkDuration,
+              actor,
+              metadata: { reportingDate: currentDate },
+              metaError: isMetaErr ? {
+                code: chunkErr.code,
+                subcode: chunkErr.subcode,
+                isTransient: chunkErr.isTransient,
+                fbtraceId: chunkErr.fbtraceId,
+                message: chunkErr.userMessage || chunkErr.message,
+                raw: chunkErr.raw,
+              } : undefined,
+            }
+          );
+
+          // Permanent error check: Expired token or auth failure terminates remaining dates
+          const isPermanent = isMetaErr && (chunkErr.category === 'TOKEN_EXPIRED' || chunkErr.code === 190);
+          if (isPermanent) {
+            const remaining = requestedDates.slice(chunkIdx + 1);
+            for (const unDate of remaining) {
+              unprocessedDates.push(unDate);
+              chunkResults.push({
+                date: unDate,
+                status: 'UNPROCESSED',
+                insightsCount: 0,
+                spend: 0,
+                impressions: 0,
+                clicks: 0,
+                durationMs: 0,
+                error: 'Không xử lý do phát hiện lỗi vĩnh viễn (Token hết hạn/Auth error) ở ngày trước.',
+              });
+            }
+            await Logger.warn(
+              'SYNC_ENGINE',
+              'SubsequentChunksAborted',
+              `Ngừng toàn bộ các ngày tiếp theo do lỗi tài khoản vĩnh viễn (Token Expired) ở ngày ${currentDate}`,
+              ctx,
+              { stage: 'token_expiration_abort', actor }
+            );
+            break;
+          }
+          // For non-permanent errors, continue to the next date!
         }
       }
-      timings['extractionMs'] = Date.now() - tExtractStart;
 
-      // Event 12: Entity extraction completed
-      await Logger.info(
-        'SYNC_ENGINE',
-        'EntityExtractionCompleted',
-        `Hoàn tất bóc tách cấu trúc trong ${timings['extractionMs']}ms: ${distinctCampaigns.size} Campaigns, ${distinctAdSets.size} AdSets, ${distinctAds.size} Ads`,
-        ctx,
-        {
-          stage: 'entity_extraction',
-          durationMs: timings['extractionMs'],
-          recordCount: distinctCampaigns.size + distinctAdSets.size + distinctAds.size,
-          metadata: {
-            campaignsCount: distinctCampaigns.size,
-            adsetsCount: distinctAdSets.size,
-            adsCount: distinctAds.size,
-          },
-        }
-      );
-
-      console.log(
-        `[MetaSyncEngine:Extraction] Found ${distinctCampaigns.size} campaigns, ` +
-        `${distinctAdSets.size} adsets, ${distinctAds.size} ads from ${validInsights.length} insights.`
-      );
-
-      // Update progress
-      await prisma.syncJob.update({
-        where: { id: syncJob.id },
-        data: {
-          errorMessage: `[Giai đoạn 3/5] Đang ghi nạp cấu trúc ${distinctCampaigns.size} Chiến dịch, ${distinctAdSets.size} Nhóm QC, ${distinctAds.size} Mẫu QC...`,
-        },
-      });
-
-      // 9. Foreign-Key Ordered Entity Persistence (Batched)
-      const tEntityPersistStart = Date.now();
-
-      // 9a. Campaigns Upsert
-      const tCampStart = Date.now();
-      const campaignDbIdMap = new Map<string, string>();
-      const campaignList = Array.from(distinctCampaigns.values());
-      await batchProcess(campaignList, 10, async (c) => {
-        const dbCampaign = await prisma.campaign.upsert({
-          where: { campaignId: c.id },
-          update: {
-            campaignName: c.name,
-          },
-          create: {
-            adAccountId: dbAdAccount.id,
-            campaignId: c.id,
-            campaignName: c.name,
-            status: 'ACTIVE',
-            effectiveStatus: 'ACTIVE',
-          },
-        });
-        campaignDbIdMap.set(c.id, dbCampaign.id);
-      });
-      timings['campaignPersistenceMs'] = Date.now() - tCampStart;
-
-      // Event 13: Campaign persistence completed
-      await Logger.info(
-        'DATABASE',
-        'CampaignPersistenceCompleted',
-        `Đã lưu ${campaignList.length} Campaign vào Neon (${timings['campaignPersistenceMs']}ms)`,
-        ctx,
-        {
-          stage: 'campaign_persistence',
-          durationMs: timings['campaignPersistenceMs'],
-          recordCount: campaignList.length,
-        }
-      );
-
-      // 9b. AdSets Upsert
-      const tAdSetStart = Date.now();
-      const adsetDbIdMap = new Map<string, string>();
-      const adsetList = Array.from(distinctAdSets.values());
-      await batchProcess(adsetList, 15, async (as) => {
-        let parentCampaignDbId = as.campaignId ? campaignDbIdMap.get(as.campaignId) : undefined;
-        if (!parentCampaignDbId && as.campaignId) {
-          const placeholder = await prisma.campaign.create({
-            data: {
-              adAccountId: dbAdAccount.id,
-              campaignId: as.campaignId,
-              campaignName: `Campaign ${as.campaignId}`,
-              status: 'UNKNOWN',
-              effectiveStatus: 'UNKNOWN',
-            },
-          });
-          parentCampaignDbId = placeholder.id;
-          campaignDbIdMap.set(as.campaignId, placeholder.id);
-        }
-
-        if (parentCampaignDbId) {
-          const dbAdSet = await prisma.adSet.upsert({
-            where: { adsetId: as.id },
-            update: {
-              adsetName: as.name,
-            },
-            create: {
-              adAccountId: dbAdAccount.id,
-              campaignId: parentCampaignDbId,
-              adsetId: as.id,
-              adsetName: as.name,
-              status: 'ACTIVE',
-              effectiveStatus: 'ACTIVE',
-            },
-          });
-          adsetDbIdMap.set(as.id, dbAdSet.id);
-        }
-      });
-      timings['adsetPersistenceMs'] = Date.now() - tAdSetStart;
-
-      // Event 14: Ad Set persistence completed
-      await Logger.info(
-        'DATABASE',
-        'AdSetPersistenceCompleted',
-        `Đã lưu ${adsetList.length} AdSet vào Neon (${timings['adsetPersistenceMs']}ms)`,
-        ctx,
-        {
-          stage: 'adset_persistence',
-          durationMs: timings['adsetPersistenceMs'],
-          recordCount: adsetList.length,
-        }
-      );
-
-      // 9c. Ads Upsert
-      const tAdStart = Date.now();
-      const adList = Array.from(distinctAds.values());
-      await batchProcess(adList, 20, async (ad) => {
-        const parentCampaignDbId = ad.campaignId ? campaignDbIdMap.get(ad.campaignId) : undefined;
-        const parentAdSetDbId = ad.adsetId ? adsetDbIdMap.get(ad.adsetId) : undefined;
-
-        if (parentCampaignDbId && parentAdSetDbId) {
-          await prisma.ad.upsert({
-            where: { adId: ad.id },
-            update: {
-              adName: ad.name,
-            },
-            create: {
-              adAccountId: dbAdAccount.id,
-              campaignId: parentCampaignDbId,
-              adsetId: parentAdSetDbId,
-              adId: ad.id,
-              adName: ad.name,
-              status: 'ACTIVE',
-              effectiveStatus: 'ACTIVE',
-            },
-          });
-        }
-      });
-      timings['adPersistenceMs'] = Date.now() - tAdStart;
-
-      // Event 15: Ad persistence completed
-      await Logger.info(
-        'DATABASE',
-        'AdPersistenceCompleted',
-        `Đã lưu ${adList.length} Ad vào Neon (${timings['adPersistenceMs']}ms)`,
-        ctx,
-        {
-          stage: 'ad_persistence',
-          durationMs: timings['adPersistenceMs'],
-          recordCount: adList.length,
-        }
-      );
-
-      timings['entitiesPersistenceMs'] = Date.now() - tEntityPersistStart;
-      console.log(`[MetaSyncEngine:Timing] Persisted active entities in ${timings['entitiesPersistenceMs']}ms`);
-
-      // Update progress
-      await prisma.syncJob.update({
-        where: { id: syncJob.id },
-        data: {
-          errorMessage: `[Giai đoạn 4/5] Đang ghi ${validInsights.length} bản ghi Daily Insights vào Neon...`,
-        },
-      });
-
-      // 10. Batch Upsert InsightsDaily (Parallel Batches of 20)
-      const tInsightsPersistStart = Date.now();
-      await batchProcess(validInsights, 20, async (insight) => {
-        const dateObj = new Date(insight.date_start + 'T00:00:00.000Z');
-        const spendVal = parseFloat(insight.spend || '0');
-        const impVal = parseInt(insight.impressions || '0', 10);
-        const clicksVal = parseInt(insight.clicks || '0', 10);
-        const reachVal = parseInt(insight.reach || '0', 10);
-        const linkClicksVal = parseInt(insight.inline_link_clicks || '0', 10);
-
-        // Calculate Meta Leads from actions array
-        let leadsVal = 0;
-        if (Array.isArray(insight.actions)) {
-          const leadAction = insight.actions.find(
-            a => a.action_type === 'lead' || a.action_type === 'onsite_conversion.lead_grouped'
-          );
-          if (leadAction) {
-            leadsVal = parseInt(leadAction.value || '0', 10);
-          }
-        }
-
-        // Extract 3-second video views from actions (action_type === "video_view").
-        let video3sViewsVal = 0;
-        if (Array.isArray(insight.actions)) {
-          const videoViewAction = insight.actions.find(a => a.action_type === 'video_view');
-          if (videoViewAction) {
-            video3sViewsVal = parseInt(videoViewAction.value || '0', 10);
-          }
-        }
-
-        const actionsJson = insight.actions ? JSON.stringify(insight.actions) : null;
-        const costPerActionTypeJson = insight.cost_per_action_type ? JSON.stringify(insight.cost_per_action_type) : null;
-        const breakdownJson = insight.action_values ? JSON.stringify(insight.action_values) : null;
-
-        await prisma.insightsDaily.upsert({
-          where: {
-            date_level_adId: {
-              date: dateObj,
-              level: 'ad',
-              adId: insight.ad_id!,
-            },
-          },
-          update: {
-            campaignId: insight.campaign_id || '',
-            campaignName: insight.campaign_name || '',
-            adsetId: insight.adset_id || '',
-            adsetName: insight.adset_name || '',
-            adName: insight.ad_name || '',
-            spend: spendVal,
-            impressions: impVal,
-            reach: reachVal,
-            frequency: reachVal > 0 ? impVal / reachVal : 1.0,
-            clicks: clicksVal,
-            linkClicks: linkClicksVal,
-            ctr: impVal > 0 ? (clicksVal / impVal) * 100 : 0,
-            cpc: clicksVal > 0 ? spendVal / clicksVal : 0,
-            cpm: impVal > 0 ? (spendVal / impVal) * 1000 : 0,
-            leads: leadsVal,
-            costPerLead: leadsVal > 0 ? spendVal / leadsVal : 0,
-            video3sViews: video3sViewsVal,
-            actionsJson,
-            costPerActionTypeJson,
-            breakdownJson,
-          },
-          create: {
-            date: dateObj,
-            adAccountId: dbAdAccount.id,
-            campaignId: insight.campaign_id || '',
-            campaignName: insight.campaign_name || '',
-            adsetId: insight.adset_id || '',
-            adsetName: insight.adset_name || '',
-            adId: insight.ad_id!,
-            adName: insight.ad_name || '',
-            level: 'ad',
-            spend: spendVal,
-            impressions: impVal,
-            reach: reachVal,
-            frequency: reachVal > 0 ? impVal / reachVal : 1.0,
-            clicks: clicksVal,
-            linkClicks: linkClicksVal,
-            ctr: impVal > 0 ? (clicksVal / impVal) * 100 : 0,
-            cpc: clicksVal > 0 ? spendVal / clicksVal : 0,
-            cpm: impVal > 0 ? (spendVal / impVal) * 1000 : 0,
-            leads: leadsVal,
-            costPerLead: leadsVal > 0 ? spendVal / leadsVal : 0,
-            video3sViews: video3sViewsVal,
-            actionsJson,
-            costPerActionTypeJson,
-            breakdownJson,
-          },
-        });
-      });
-      timings['insightsPersistenceMs'] = Date.now() - tInsightsPersistStart;
-
-      // Event 16: Daily Insights persistence completed
-      await Logger.info(
-        'DATABASE',
-        'DailyInsightsPersistenceCompleted',
-        `Đã lưu ${validInsights.length} bản ghi Daily Insights vào Neon (${timings['insightsPersistenceMs']}ms)`,
-        ctx,
-        {
-          stage: 'insights_persistence',
-          durationMs: timings['insightsPersistenceMs'],
-          recordCount: validInsights.length,
-        }
-      );
-
-      console.log(`[MetaSyncEngine:Timing] Persisted ${validInsights.length} insights in ${timings['insightsPersistenceMs']}ms`);
-
-      // 11. Expired Worker Protection: Ensure our job lease was not revoked
+      // 8. Expired Worker Protection: Ensure our job lease was not revoked
       const currentJobState = await prisma.syncJob.findUnique({
         where: { id: syncJob.id },
         select: { status: true },
@@ -817,77 +932,111 @@ export class MetaSyncEngine {
         );
       }
 
-      // Finalize SyncJob on Success
-      await prisma.syncJob.update({
-        where: { id: syncJob.id },
-        data: {
-          status: 'success',
-          finishedAt: new Date(),
-          errorMessage: null,
-        },
-      });
-
-      // Update connection's lastSyncAt
-      await prisma.metaConnection.update({
-        where: { id: connection.id },
-        data: {
-          lastSyncAt: new Date(),
-          status: 'connected',
-        },
-      });
+      // 9. Determine Final Job Status (SUCCESS, PARTIAL, FAILED)
+      let finalStatus: 'success' | 'partial' | 'failed' = 'failed';
+      if (failedDates.length === 0 && unprocessedDates.length === 0) {
+        finalStatus = 'success';
+      } else if (successfulDates.length > 0) {
+        finalStatus = 'partial';
+      } else {
+        finalStatus = 'failed';
+      }
 
       const totalExecutionTimeMs = Date.now() - startTime;
       timings['totalExecutionTimeMs'] = totalExecutionTimeMs;
 
-      // Event 17: SyncJob completed
+      const summaryMessage = finalStatus === 'success'
+        ? null
+        : `Đồng bộ hoàn tất ${finalStatus.toUpperCase()}: ${successfulDates.length}/${totalDates} ngày thành công, ${failedDates.length} ngày lỗi, ${unprocessedDates.length} ngày chưa xử lý.${failedDates.length > 0 ? ` Lỗi tiêu biểu: ${failedDates[0].error}` : ''}`;
+
+      // Finalize SyncJob in Neon
+      await prisma.syncJob.update({
+        where: { id: syncJob.id },
+        data: {
+          status: finalStatus,
+          finishedAt: new Date(),
+          errorMessage: summaryMessage,
+        },
+      });
+
+      // Update connection's lastSyncAt if any date succeeded
+      if (finalStatus !== 'failed') {
+        await prisma.metaConnection.update({
+          where: { id: connection.id },
+          data: {
+            lastSyncAt: new Date(),
+            status: 'connected',
+          },
+        });
+      }
+
+      // Event 17: SyncJob completed / partial / failed
       await Logger.info(
         'SYNC_ENGINE',
-        'SyncJobCompleted',
-        `SyncJob ${syncJob.id} hoàn tất thành công trong ${totalExecutionTimeMs}ms`,
+        finalStatus === 'success' ? 'SyncJobCompleted' : finalStatus === 'partial' ? 'SyncJobPartial' : 'SyncJobFailed',
+        `SyncJob ${syncJob.id} kết thúc với trạng thái ${finalStatus.toUpperCase()} trong ${totalExecutionTimeMs}ms (${successfulDates.length}/${totalDates} ngày)`,
         ctx,
         {
           stage: 'job_completion',
           durationMs: totalExecutionTimeMs,
-          recordCount: validInsights.length,
+          recordCount: grandTotalInsights,
           actor,
           metadata: {
-            campaignsUpserted: campaignList.length,
-            adsetsUpserted: adsetList.length,
-            adsUpserted: adList.length,
-            insightsUpserted: validInsights.length,
-            totalSpend: Math.round(totalSpend),
-            totalImpressions,
-            totalClicks,
+            finalStatus,
+            totalDates,
+            successfulDates,
+            failedDates,
+            unprocessedDates,
+            campaignsUpserted: distinctCampaigns.size,
+            adsetsUpserted: distinctAdSets.size,
+            adsUpserted: distinctAds.size,
+            insightsUpserted: grandTotalInsights,
+            totalSpend: Math.round(grandTotalSpend),
+            totalImpressions: grandTotalImpressions,
+            totalClicks: grandTotalClicks,
           },
         }
       );
 
       console.log(
-        `[MetaSyncEngine:Complete] Job ${syncJob.id} completed successfully in ${totalExecutionTimeMs}ms. ` +
-        `Persisted ${campaignList.length} campaigns, ${adsetList.length} adsets, ${adList.length} ads, ${validInsights.length} insights. ` +
-        `Total Spend: ${Math.round(totalSpend)} VND, Imp: ${totalImpressions}, Clicks: ${totalClicks}`
+        `[MetaSyncEngine:Complete] Job ${syncJob.id} finished as ${finalStatus.toUpperCase()} in ${totalExecutionTimeMs}ms. ` +
+        `Dates: ${successfulDates.length} success, ${failedDates.length} failed, ${unprocessedDates.length} unprocessed. ` +
+        `Persisted ${distinctCampaigns.size} campaigns, ${distinctAdSets.size} adsets, ${distinctAds.size} ads, ${grandTotalInsights} insights. ` +
+        `Total Spend: ${Math.round(grandTotalSpend)} VND, Imp: ${grandTotalImpressions}, Clicks: ${grandTotalClicks}`
       );
 
       return {
-        success: true,
+        success: finalStatus !== 'failed',
+        status: finalStatus.toUpperCase() as 'SUCCESS' | 'PARTIAL' | 'FAILED',
         jobId: syncJob.id,
         jobType,
         adAccountId: normalizedAccountId,
         accountName: accountInfo.accountName,
         dateRange: { since: dateFrom, until: dateTo },
+        datesSummary: {
+          totalDates,
+          successfulCount: successfulDates.length,
+          failedCount: failedDates.length,
+          unprocessedCount: unprocessedDates.length,
+          successfulDates,
+          failedDates,
+          unprocessedDates,
+        },
+        chunks: chunkResults,
         counts: {
-          campaignsUpserted: campaignList.length,
-          adsetsUpserted: adsetList.length,
-          adsUpserted: adList.length,
-          insightsUpserted: validInsights.length,
+          campaignsUpserted: distinctCampaigns.size,
+          adsetsUpserted: distinctAdSets.size,
+          adsUpserted: distinctAds.size,
+          insightsUpserted: grandTotalInsights,
         },
         metrics: {
-          totalSpend: Math.round(totalSpend),
-          totalImpressions,
-          totalClicks,
+          totalSpend: Math.round(grandTotalSpend),
+          totalImpressions: grandTotalImpressions,
+          totalClicks: grandTotalClicks,
         },
         timings,
         executionTimeMs: totalExecutionTimeMs,
+        error: finalStatus === 'failed' ? (failedDates[0]?.error || 'Tất cả các ngày yêu cầu đều thất bại.') : undefined,
       };
     } catch (error: unknown) {
       const errorMsg = (error as Error).message || 'Unknown sync error';

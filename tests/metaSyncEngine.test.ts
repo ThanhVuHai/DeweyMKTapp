@@ -4,8 +4,11 @@ import {
   MetaSyncEngine,
   ENABLED_ACCOUNTS_FOR_SYNC,
   normalizeSyncDate,
+  splitDateRangeToDays,
   batchProcess,
   SYNC_JOB_LEASE_MS,
+  FUNCTION_TIMEOUT_MS,
+  SAFETY_BUDGET_REMAINING_MS,
 } from '../src/lib/sync/metaSyncEngine';
 import { encrypt } from '../src/lib/crypto';
 import { GET as cronHandler, POST as cronPostHandler } from '../src/app/api/cron/sync/route';
@@ -406,4 +409,48 @@ test('Meta error code 100 (invalid fields param) is reported with correct code a
     `Expected API_ERROR or ACCOUNT_NOT_ACCESSIBLE, got: ${err.category}`
   );
   assert.ok(err.message.includes('video_3sec_video_view'), 'Error message should contain the offending field name');
+});
+
+test('Date Chunking: splitDateRangeToDays handles single date range', () => {
+  const dates = splitDateRangeToDays('2026-10-01', '2026-10-01');
+  assert.deepStrictEqual(dates, ['2026-10-01']);
+});
+
+test('Date Chunking: splitDateRangeToDays splits 7-day range into 7 consecutive daily chunks', () => {
+  const dates = splitDateRangeToDays('2026-10-01', '2026-10-07');
+  assert.deepStrictEqual(dates, [
+    '2026-10-01',
+    '2026-10-02',
+    '2026-10-03',
+    '2026-10-04',
+    '2026-10-05',
+    '2026-10-06',
+    '2026-10-07',
+  ]);
+  assert.strictEqual(dates.length, 7);
+});
+
+test('Date Chunking: splitDateRangeToDays correctly handles month boundary transition', () => {
+  const dates = splitDateRangeToDays('2026-10-30', '2026-11-02');
+  assert.deepStrictEqual(dates, [
+    '2026-10-30',
+    '2026-10-31',
+    '2026-11-01',
+    '2026-11-02',
+  ]);
+  assert.strictEqual(dates.length, 4);
+});
+
+test('Date Chunking: splitDateRangeToDays handles inverted or invalid date range gracefully', () => {
+  const datesInverted = splitDateRangeToDays('2026-10-07', '2026-10-01');
+  assert.deepStrictEqual(datesInverted, ['2026-10-07']);
+
+  const datesInvalid = splitDateRangeToDays('invalid-date', '2026-10-01');
+  assert.deepStrictEqual(datesInvalid, ['invalid-date']);
+});
+
+test('Execution Safety & Budget: Constants configured for 300s Serverless execution', () => {
+  assert.strictEqual(FUNCTION_TIMEOUT_MS, 280 * 1000, 'Function timeout must allow buffer under 300s limit');
+  assert.strictEqual(SAFETY_BUDGET_REMAINING_MS, 25 * 1000, 'Safety budget threshold is 25s');
+  assert.ok(FUNCTION_TIMEOUT_MS < SYNC_JOB_LEASE_MS, 'Function timeout must be bounded within job lease');
 });
