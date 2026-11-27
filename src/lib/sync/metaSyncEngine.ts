@@ -826,6 +826,17 @@ export class MetaSyncEngine {
           grandTotalClicks += chunkClicks;
           grandTotalInsights += validInsights.length;
 
+          // Verify execution lock ownership immediately before persisting advertising data
+          const prePersistJobCheck = await prisma.syncJob.findUnique({
+            where: { id: syncJob.id },
+            select: { status: true },
+          });
+          if (prePersistJobCheck && prePersistJobCheck.status !== 'running') {
+            throw new Error(
+              `[Stale Worker Revocation] Worker đã mất quyền thực thi Job ${syncJob.id} (Trạng thái hiện tại: ${prePersistJobCheck.status}). Chặn thao tác lưu dữ liệu quảng cáo ngày ${currentDate}.`
+            );
+          }
+
           // G. Upsert Campaigns for Chunk (Batched)
           const campaignList = Array.from(chunkCampaigns.values());
           await batchProcess(campaignList, 10, async (c) => {
@@ -1000,6 +1011,17 @@ export class MetaSyncEngine {
             clicks: chunkClicks,
             durationMs: chunkDuration,
           });
+
+          // Task 2.4: Verify lock ownership immediately before marking checkpoint SUCCESS
+          const preCheckpointJobCheck = await prisma.syncJob.findUnique({
+            where: { id: syncJob.id },
+            select: { status: true },
+          });
+          if (preCheckpointJobCheck && preCheckpointJobCheck.status !== 'running') {
+            throw new Error(
+              `[Stale Worker Revocation] Worker đã mất quyền thực thi Job ${syncJob.id} (Trạng thái hiện tại: ${preCheckpointJobCheck.status}). Chặn thao tác ghi nhận Checkpoint ngày ${currentDate}.`
+            );
+          }
 
           // Task 2.4: Persist successful chunk checkpoint
           await CheckpointManager.recordChunkSuccess(
