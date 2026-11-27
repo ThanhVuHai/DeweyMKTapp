@@ -196,7 +196,7 @@ export async function POST(request: Request) {
       );
     `);
 
-    await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "SyncCheckpoint_account_date_key" ON "SyncCheckpoint"("adAccountId", "reportingDate");`);
+    await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "SyncCheckpoint_adAccountId_reportingDate_key" ON "SyncCheckpoint"("adAccountId", "reportingDate");`);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "SyncCheckpoint_syncJobId_idx" ON "SyncCheckpoint"("syncJobId");`);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "SyncCheckpoint_status_idx" ON "SyncCheckpoint"("status");`);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "SyncCheckpoint_adAccountId_status_idx" ON "SyncCheckpoint"("adAccountId", "status");`);
@@ -212,13 +212,22 @@ export async function POST(request: Request) {
     `;
     const syncLogExistsNow = postTableCheck[0]?.exists || false;
 
+    const postCheckpointCheck = await prisma.$queryRaw<TableCheckRow[]>`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'SyncCheckpoint'
+      ) as exists;
+    `;
+    const syncCheckpointExistsNow = postCheckpointCheck[0]?.exists || false;
+
     // Verify indexes
     interface IndexRow {
       indexname: string;
     }
     const indexes = await prisma.$queryRaw<IndexRow[]>`
       SELECT indexname FROM pg_indexes 
-      WHERE tablename = 'SyncLog' OR tablename = 'AuditLog';
+      WHERE tablename = 'SyncLog' OR tablename = 'AuditLog' OR tablename = 'SyncCheckpoint';
     `;
     const indexNames = indexes.map(i => i.indexname);
 
@@ -235,6 +244,7 @@ export async function POST(request: Request) {
     const postAuditLogCount = await prisma.auditLog.count();
 
     const dataIntegrityPassed =
+      syncCheckpointExistsNow &&
       preInsightsCount === postInsightsCount &&
       Math.round(preStoredSpend) === Math.round(postStoredSpend) &&
       postAuditLogCount >= preAuditLogCount;
@@ -245,10 +255,12 @@ export async function POST(request: Request) {
       actorEmail: auth.user?.email || 'admin',
       action: 'APPLY_ADDITIVE_MIGRATION',
       entityType: 'DATABASE_SCHEMA',
-      entityId: '20261126_add_synclog_additive',
+      entityId: '20261127_add_synccheckpoint_additive',
       after: {
         syncLogAlreadyExists,
+        syncCheckpointAlreadyExists,
         syncLogExistsNow,
+        syncCheckpointExistsNow,
         indexesCreated: indexNames,
         dataIntegrityPassed,
       },
@@ -257,7 +269,7 @@ export async function POST(request: Request) {
     await Logger.info(
       'DATABASE',
       'AdditiveMigrationApplied',
-      'Đã áp dụng thành công additive migration SyncLog trên Neon Preview.',
+      'Đã áp dụng thành công additive migration SyncLog và SyncCheckpoint trên Neon Preview.',
       {},
       {
         stage: 'database_migration',
@@ -271,16 +283,18 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
-      migration: '20261126_add_synclog_additive',
+      migration: '20261127_add_synccheckpoint_additive',
       databaseIsolation: isolation,
       preMigration: {
         syncLogAlreadyExists,
+        syncCheckpointAlreadyExists,
         gisHanoiInsightsCount: preInsightsCount,
         gisHanoiStoredSpend: Math.round(preStoredSpend),
         auditLogCount: preAuditLogCount,
       },
       postMigration: {
         syncLogExists: syncLogExistsNow,
+        syncCheckpointExists: syncCheckpointExistsNow,
         gisHanoiInsightsCount: postInsightsCount,
         gisHanoiStoredSpend: Math.round(postStoredSpend),
         auditLogCount: postAuditLogCount,
@@ -288,7 +302,7 @@ export async function POST(request: Request) {
       },
       dataIntegrityVerified: dataIntegrityPassed,
       message: dataIntegrityPassed
-        ? 'Migration thành công! Cấu trúc SyncLog đã sẵn sàng và toàn bộ dữ liệu lịch sử được bảo toàn.'
+        ? 'Migration thành công! Cấu trúc SyncLog và SyncCheckpoint đã sẵn sàng và toàn bộ dữ liệu lịch sử được bảo toàn.'
         : 'Cảnh báo: Phát hiện sai lệch số liệu sau migration.',
     });
   } catch (error: unknown) {

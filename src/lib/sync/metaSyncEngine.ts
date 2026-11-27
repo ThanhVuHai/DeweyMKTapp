@@ -593,7 +593,18 @@ export class MetaSyncEngine {
           break;
         }
 
-        // B. Update live progress on SyncJob
+        // B. Expired Worker Check: Verify job lease has not been revoked before processing chunk
+        const liveJobState = await prisma.syncJob.findUnique({
+          where: { id: syncJob.id },
+          select: { status: true },
+        });
+        if (liveJobState && liveJobState.status !== 'running') {
+          throw new Error(
+            `Tiến trình (Job ID: ${syncJob.id}) đã hết hạn lease hoặc bị hủy (Trạng thái hiện tại: ${liveJobState.status}). Dừng thực thi ngay lập tức.`
+          );
+        }
+
+        // C. Update live progress on SyncJob
         await prisma.syncJob.update({
           where: { id: syncJob.id },
           data: {
