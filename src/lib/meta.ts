@@ -179,15 +179,124 @@ export interface MetaPaginatedResponse<T> {
   paging?: MetaPagingInfo;
 }
 
+export interface RateLimitMetadata {
+  retryAfterSeconds?: number;
+  estimatedTimeToRegainAccess?: number;
+  callCount?: number;
+  totalTime?: number;
+  totalCpuTime?: number;
+  rawUsageHeader?: string;
+}
+
+export type RetryClassification =
+  | 'PERMANENT'
+  | 'META_ERROR_2'
+  | 'RATE_LIMIT'
+  | 'SERVER_ERROR_5XX'
+  | 'NETWORK_TIMEOUT'
+  | 'UNKNOWN';
+
+export interface RetryPolicy {
+  baseDelayMs: number;
+  maxDelayMs: number;
+  maxAttempts: number;
+  backoffFactor: number;
+  jitter: boolean;
+}
+
+/**
+ * Task 2.3: Configurable, error-aware retry policies with jitter.
+ * Initial hypotheses based on official Meta Marketing API error semantics.
+ */
+export const RETRY_POLICIES: Record<RetryClassification, RetryPolicy> = {
+  PERMANENT: {
+    baseDelayMs: 0,
+    maxDelayMs: 0,
+    maxAttempts: 0,
+    backoffFactor: 1,
+    jitter: false,
+  },
+  META_ERROR_2: {
+    baseDelayMs: 5000, // ~5s initial base delay with exponential growth for Meta Error 2
+    maxDelayMs: 30000, // max 30s
+    maxAttempts: 3,
+    backoffFactor: 2,
+    jitter: true,
+  },
+  RATE_LIMIT: {
+    baseDelayMs: 10000, // fallback base delay if no server header
+    maxDelayMs: 60000,  // max 60s
+    maxAttempts: 3,
+    backoffFactor: 2,
+    jitter: true,
+  },
+  SERVER_ERROR_5XX: {
+    baseDelayMs: 2000, // ~2s initial base delay for HTTP 5xx
+    maxDelayMs: 15000, // max 15s
+    maxAttempts: 3,
+    backoffFactor: 2,
+    jitter: true,
+  },
+  NETWORK_TIMEOUT: {
+    baseDelayMs: 1000, // ~1s short exponential backoff for temporary network drops
+    maxDelayMs: 10000, // max 10s
+    maxAttempts: 3,
+    backoffFactor: 2,
+    jitter: true,
+  },
+  UNKNOWN: {
+    baseDelayMs: 2000,
+    maxDelayMs: 10000,
+    maxAttempts: 1,
+    backoffFactor: 2,
+    jitter: true,
+  },
+};
+
+export interface RequestRetryContext {
+  attempt: number;
+  maxAttempts: number;
+  classification: RetryClassification;
+  delayMs: number;
+  requestDurationMs: number;
+  totalRetryElapsedMs: number;
+  remainingJobBudgetMs?: number;
+  rateLimit?: RateLimitMetadata;
+  error: unknown;
+}
+
+export interface RequestRecoveredContext {
+  attempt: number;
+  totalRetryElapsedMs: number;
+  classification: RetryClassification;
+  lastDelayMs: number;
+}
+
+export interface RequestExhaustedContext {
+  totalAttempts: number;
+  totalRetryElapsedMs: number;
+  classification: RetryClassification;
+  lastError: unknown;
+}
+
+export interface RequestRetryOptions {
+  maxRetries?: number;
+  baseDelayMs?: number;
+  policies?: Partial<Record<RetryClassification, Partial<RetryPolicy>>>;
+  remainingBudgetMs?: () => number;
+  maxRetryBudgetMs?: number;
+  onRetry?:
+    | ((attempt: number, error: unknown, delayMs: number, context?: RequestRetryContext) => void)
+    | ((context: RequestRetryContext) => void);
+  onRecovered?: (context: RequestRecoveredContext) => void;
+  onExhausted?: (context: RequestExhaustedContext) => void;
+}
+
 export interface MetaPaginationOptions {
   limit?: number;
   maxPages?: number;
   afterCursor?: string;
-  retryOptions?: {
-    maxRetries?: number;
-    baseDelayMs?: number;
-    onRetry?: (attempt: number, error: unknown, delayMs: number) => void;
-  };
+  retryOptions?: RequestRetryOptions;
 }
 
 export interface MetaPaginatedResult<T> {
@@ -216,6 +325,181 @@ export type MetaErrorCategory =
   | 'NETWORK_ERROR'
   | 'API_ERROR';
 
+/**
+ * Calculates exponential backoff with full jitter.
+ * Guarantees delay is never lower than a valid server-specified minimum delay (e.g. Retry-After).
+ */
+export function calculateBackoffWithJitter(
+  baseDelayMs: number,
+  attempt: number,
+  maxDelayMs: number,
+  backoffFactor: number = 2,
+  minDelayMs: number = 0
+): number {
+  if (baseDelayMs <= 0) return 0;
+  const exponential = baseDelayMs * Math.pow(backoffFactor, attempt - 1);
+  const bounded = Math.min(exponential, maxDelayMs);
+
+  const effectiveMin = Math.min(minDelayMs, bounded);
+  const jittered = effectiveMin + Math.floor(Math.random() * (bounded - effectiveMin + 1));
+  return Math.max(minDelayMs, jittered);
+}
+
+/**
+ * Extracts rate-limit and throttling metadata from Meta Graph API response headers.
+ */
+export function extractRateLimitHeaders(
+  headers?: Headers | Record<string, string>
+): RateLimitMetadata | undefined {
+  if (!headers) return undefined;
+
+  let retryAfterSeconds: number | undefined = undefined;
+  let estimatedTimeToRegainAccess: number | undefined = undefined;
+  let callCount: number | undefined = undefined;
+  let totalTime: number | undefined = undefined;
+  let totalCpuTime: number | undefined = undefined;
+  let rawUsageHeader: string | undefined = undefined;
+
+  const getHeader = (name: string): string | null => {
+    if (typeof (headers as Headers).get === 'function') {
+      return (headers as Headers).get(name);
+    }
+    const h = headers as Record<string, string>;
+    return h[name] || h[name.toLowerCase()] || null;
+  };
+
+  const retryAfterVal = getHeader('retry-after');
+  if (retryAfterVal) {
+    const parsed = parseInt(retryAfterVal, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      retryAfterSeconds = parsed;
+    }
+  }
+
+  const busUsage = getHeader('x-business-use-case-usage');
+  if (busUsage) {
+    rawUsageHeader = busUsage;
+    try {
+      const parsedObj = JSON.parse(busUsage);
+      const firstKey = Object.keys(parsedObj)[0];
+      const usageArray = firstKey ? parsedObj[firstKey] : null;
+      if (Array.isArray(usageArray) && usageArray.length > 0) {
+        const item = usageArray[0];
+        if (typeof item.estimated_time_to_regain_access === 'number' && item.estimated_time_to_regain_access > 0) {
+          estimatedTimeToRegainAccess = item.estimated_time_to_regain_access * 60; // minutes to seconds
+        }
+        if (typeof item.call_count === 'number') callCount = item.call_count;
+        if (typeof item.total_time === 'number') totalTime = item.total_time;
+        if (typeof item.total_cpu_time === 'number') totalCpuTime = item.total_cpu_time;
+      }
+    } catch {}
+  }
+
+  const appUsage = getHeader('x-app-usage');
+  if (appUsage && !rawUsageHeader) {
+    rawUsageHeader = appUsage;
+    try {
+      const parsedObj = JSON.parse(appUsage);
+      if (typeof parsedObj.call_count === 'number') callCount = parsedObj.call_count;
+      if (typeof parsedObj.total_time === 'number') totalTime = parsedObj.total_time;
+      if (typeof parsedObj.total_cpu_time === 'number') totalCpuTime = parsedObj.total_cpu_time;
+    } catch {}
+  }
+
+  if (
+    retryAfterSeconds !== undefined ||
+    estimatedTimeToRegainAccess !== undefined ||
+    callCount !== undefined ||
+    totalTime !== undefined ||
+    totalCpuTime !== undefined
+  ) {
+    return {
+      retryAfterSeconds,
+      estimatedTimeToRegainAccess,
+      callCount,
+      totalTime,
+      totalCpuTime,
+      rawUsageHeader,
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * Classifies an error into actionable retry categories based on Meta API documentation and HTTP semantics.
+ */
+export function classifyMetaError(
+  error: unknown,
+  httpStatus?: number
+): RetryClassification {
+  if (error instanceof MetaApiError) {
+    // 1. Permanent non-retryable errors
+    if (
+      error.category === 'TOKEN_EXPIRED' ||
+      error.category === 'MISSING_ADS_READ' ||
+      error.category === 'MISSING_BUSINESS_MANAGEMENT' ||
+      error.category === 'ACCOUNT_NOT_ACCESSIBLE' ||
+      error.code === 190 ||
+      error.code === 100 ||
+      error.code === 200 ||
+      error.code === 278 ||
+      error.code === 803
+    ) {
+      return 'PERMANENT';
+    }
+
+    // 2. Meta Error 2: Service temporarily unavailable
+    if (error.code === 2 || error.subcode === 1357045) {
+      return 'META_ERROR_2';
+    }
+
+    // 3. Rate limiting
+    if (
+      error.category === 'RATE_LIMIT' ||
+      error.code === 17 ||
+      error.code === 80000 ||
+      error.code === 613 ||
+      httpStatus === 429
+    ) {
+      return 'RATE_LIMIT';
+    }
+
+    // 4. HTTP 5xx Server errors
+    const effectiveStatus = httpStatus || error.httpStatus;
+    if (effectiveStatus && effectiveStatus >= 500 && effectiveStatus <= 599) {
+      return 'SERVER_ERROR_5XX';
+    }
+
+    // 5. Network errors
+    if (error.category === 'NETWORK_ERROR') {
+      return 'NETWORK_TIMEOUT';
+    }
+
+    // 6. Explicitly transient
+    if (error.isTransient) {
+      return 'SERVER_ERROR_5XX';
+    }
+
+    return 'UNKNOWN';
+  }
+
+  // Non-MetaApiError (raw fetch errors, AbortError, socket timeouts)
+  const err = error as Error;
+  const errMsg = err?.message?.toLowerCase() || '';
+  if (err?.name === 'AbortError' || errMsg.includes('timeout') || errMsg.includes('etimedout')) {
+    return 'NETWORK_TIMEOUT';
+  }
+  if (errMsg.includes('fetch failed') || errMsg.includes('econnreset') || errMsg.includes('socket hang up')) {
+    return 'NETWORK_TIMEOUT';
+  }
+  if (httpStatus && httpStatus >= 500 && httpStatus <= 599) {
+    return 'SERVER_ERROR_5XX';
+  }
+
+  return 'UNKNOWN';
+}
+
 export class MetaApiError extends Error {
   public code?: number;
   public subcode?: number;
@@ -224,6 +508,8 @@ export class MetaApiError extends Error {
   public category: MetaErrorCategory;
   public userMessage: string;
   public technicalDetails?: string;
+  public httpStatus?: number;
+  public rateLimitMetadata?: RateLimitMetadata;
   public raw?: unknown;
 
   constructor(
@@ -236,6 +522,8 @@ export class MetaApiError extends Error {
       category?: MetaErrorCategory;
       userMessage?: string;
       technicalDetails?: string;
+      httpStatus?: number;
+      rateLimitMetadata?: RateLimitMetadata;
       raw?: unknown;
     }
   ) {
@@ -248,6 +536,8 @@ export class MetaApiError extends Error {
     this.category = options?.category || 'API_ERROR';
     this.userMessage = options?.userMessage || message;
     this.technicalDetails = options?.technicalDetails || message;
+    this.httpStatus = options?.httpStatus;
+    this.rateLimitMetadata = options?.rateLimitMetadata;
     this.raw = options?.raw;
   }
 }
@@ -282,15 +572,23 @@ export function isMockToken(token: string): boolean {
  * Parses raw Meta Graph API error response into structured MetaApiError
  * with actionable Vietnamese instructions for the user.
  */
-export function parseMetaError(errorData: unknown): MetaApiError {
+export function parseMetaError(
+  errorData: unknown,
+  responseMeta?: {
+    httpStatus?: number;
+    headers?: Headers | Record<string, string>;
+  }
+): MetaApiError {
   const err = (errorData as { error?: { code?: number; error_subcode?: number; message?: string; is_transient?: boolean; fbtrace_id?: string } })?.error ||
     (errorData as { code?: number; error_subcode?: number; message?: string; is_transient?: boolean; fbtrace_id?: string }) ||
     {};
   const code = err.code;
   const subcode = err.error_subcode;
-  const isTransient = err.is_transient;
+  const isTransient = err.is_transient ?? (code === 2 || subcode === 1357045);
   const fbtraceId = err.fbtrace_id;
   const rawMsg = err.message || 'Meta API request failed';
+  const httpStatus = responseMeta?.httpStatus;
+  const rateLimitMetadata = extractRateLimitHeaders(responseMeta?.headers);
 
   // 1. Token Expired / Invalid
   if (
@@ -310,6 +608,8 @@ export function parseMetaError(errorData: unknown): MetaApiError {
       category: 'TOKEN_EXPIRED',
       userMessage: 'Access Token đã hết hạn hoặc không hợp lệ. Vui lòng tạo Token mới từ Meta for Developers và cập nhật lại cấu hình kết nối.',
       technicalDetails: `Meta OAuthException (code ${code}, subcode ${subcode}): ${rawMsg}`,
+      httpStatus,
+      rateLimitMetadata,
     });
   }
 
@@ -324,6 +624,8 @@ export function parseMetaError(errorData: unknown): MetaApiError {
       category: 'MISSING_BUSINESS_MANAGEMENT',
       userMessage: 'Yêu cầu quyền business_management để đọc thông tin Business Manager. Với tính năng đọc và phân tích quảng cáo cơ bản, hệ thống chỉ cần quyền ads_read.',
       technicalDetails: `Meta Permission Error (code ${code}): ${rawMsg}`,
+      httpStatus,
+      rateLimitMetadata,
     });
   }
 
@@ -344,6 +646,8 @@ export function parseMetaError(errorData: unknown): MetaApiError {
       category: 'MISSING_ADS_READ',
       userMessage: 'Token thiếu quyền ads_read. Vui lòng cấp quyền ads_read cho token trong Meta for Developers hoặc Meta App để truy cập dữ liệu quảng cáo.',
       technicalDetails: `Meta Permission Error (code ${code}): ${rawMsg}`,
+      httpStatus,
+      rateLimitMetadata,
     });
   }
 
@@ -363,11 +667,13 @@ export function parseMetaError(errorData: unknown): MetaApiError {
       category: 'ACCOUNT_NOT_ACCESSIBLE',
       userMessage: 'Không tìm thấy hoặc Token không có quyền truy cập Ad Account này. Vui lòng kiểm tra lại Ad Account ID (dạng act_xxxxxxxx) và phân quyền của bạn trong Trình quản lý quảng cáo.',
       technicalDetails: `Meta Account Access Error (code ${code}): ${rawMsg}`,
+      httpStatus,
+      rateLimitMetadata,
     });
   }
 
   // 5. Rate Limit
-  if (code === 17 || code === 80000 || code === 613 || rawMsg.includes('rate limit')) {
+  if (code === 17 || code === 80000 || code === 613 || rawMsg.includes('rate limit') || httpStatus === 429) {
     return new MetaApiError(rawMsg, {
       code,
       subcode,
@@ -377,6 +683,8 @@ export function parseMetaError(errorData: unknown): MetaApiError {
       category: 'RATE_LIMIT',
       userMessage: 'Đã vượt quá giới hạn tần suất gọi Meta API (Rate Limit). Vui lòng thử lại sau vài phút.',
       technicalDetails: `Meta Rate Limit (code ${code}): ${rawMsg}`,
+      httpStatus,
+      rateLimitMetadata,
     });
   }
 
@@ -389,6 +697,8 @@ export function parseMetaError(errorData: unknown): MetaApiError {
     category: 'API_ERROR',
     userMessage: `Lỗi kết nối Meta API: ${rawMsg}`,
     technicalDetails: `Meta API Error [${code}:${subcode}]: ${rawMsg}`,
+    httpStatus,
+    rateLimitMetadata,
   });
 }
 
@@ -447,15 +757,17 @@ export class MetaApiService {
         cache: 'no-store',
       });
 
+      const responseHeaders = response.headers;
+      const httpStatus = response.status;
       const data = await response.json();
 
       if (!response.ok) {
-        throw parseMetaError(data);
+        throw parseMetaError(data, { httpStatus, headers: responseHeaders });
       }
 
       // Handle edge case where Meta API returns an error object inside HTTP 200
       if (data && typeof data === 'object' && 'error' in data && (data as { error: unknown }).error) {
-        throw parseMetaError(data);
+        throw parseMetaError(data, { httpStatus, headers: responseHeaders });
       }
 
       return data as T;
@@ -473,58 +785,171 @@ export class MetaApiService {
   }
 
   /**
-   * Bounded exponential backoff retry for transient network and rate limit errors.
+   * Task 2.3: Error-aware, jittered exponential backoff retry engine
+   * with global execution budget and per-chunk budget enforcement.
    */
   public static async requestMetaAPIWithRetry<T = Record<string, unknown>>(
     endpoint: string,
     connection: MetaConnectionParam,
     params: Record<string, string> = {},
-    options: {
-      maxRetries?: number;
-      baseDelayMs?: number;
-      onRetry?: (attempt: number, error: unknown, delayMs: number) => void;
-    } = {}
+    options: RequestRetryOptions = {}
   ): Promise<T> {
-    const maxRetries = options.maxRetries ?? 3;
-    const baseDelayMs = options.baseDelayMs ?? 200;
     let attempt = 0;
+    let totalRetryElapsedMs = 0;
+    let lastClassification: RetryClassification = 'UNKNOWN';
+    let lastDelayMs = 0;
 
-    while (attempt <= maxRetries) {
+    const maxRetryBudgetMs = options.maxRetryBudgetMs ?? 45 * 1000; // 45s per chunk max
+
+    while (true) {
+      const requestStart = Date.now();
       try {
-        return await this.requestMetaAPI<T>(endpoint, connection, params);
+        const result = await this.requestMetaAPI<T>(endpoint, connection, params);
+
+        // If recovered after 1 or more failed attempts, invoke onRecovered hook
+        if (attempt > 0 && options.onRecovered) {
+          try {
+            options.onRecovered({
+              attempt,
+              totalRetryElapsedMs,
+              classification: lastClassification,
+              lastDelayMs,
+            });
+          } catch {
+            // Ignore callback error
+          }
+        }
+        return result;
       } catch (error: unknown) {
         attempt++;
-        if (error instanceof MetaApiError) {
-          const isRetryable =
-            error.category === 'RATE_LIMIT' ||
-            error.category === 'NETWORK_ERROR' ||
-            (error.code !== undefined && [17, 613, 80000, 2].includes(error.code));
+        const requestDurationMs = Date.now() - requestStart;
+        const httpStatus = error instanceof MetaApiError ? error.httpStatus : undefined;
+        const classification = classifyMetaError(error, httpStatus);
+        lastClassification = classification;
 
-          if (!isRetryable || attempt > maxRetries) {
-            throw error;
-          }
-        } else if (attempt > maxRetries) {
+        // 1. Permanent error check: Do NOT retry authentication, permission or schema errors
+        if (classification === 'PERMANENT') {
           throw error;
         }
 
-        // Jittered exponential backoff: 200ms, 400ms, 800ms...
-        const jitter = Math.floor(Math.random() * 50);
-        const delay = baseDelayMs * Math.pow(2, attempt - 1) + jitter;
+        // 2. Resolve error-aware policy
+        const defaultPolicy = RETRY_POLICIES[classification] || RETRY_POLICIES.UNKNOWN;
+        const customPolicy = options.policies?.[classification];
+        const maxAttempts = options.maxRetries ?? customPolicy?.maxAttempts ?? defaultPolicy.maxAttempts;
+
+        if (attempt > maxAttempts) {
+          if (options.onExhausted) {
+            try {
+              options.onExhausted({
+                totalAttempts: attempt - 1,
+                totalRetryElapsedMs,
+                classification,
+                lastError: error,
+              });
+            } catch {}
+          }
+          throw error;
+        }
+
+        const baseDelay = options.baseDelayMs ?? customPolicy?.baseDelayMs ?? defaultPolicy.baseDelayMs;
+        const maxDelay = customPolicy?.maxDelayMs ?? defaultPolicy.maxDelayMs;
+        const factor = customPolicy?.backoffFactor ?? defaultPolicy.backoffFactor;
+
+        // 3. Server-specified minimum delay (Retry-After or estimated_time_to_regain_access)
+        const rateLimit = error instanceof MetaApiError ? error.rateLimitMetadata : undefined;
+        const serverMinSec = rateLimit?.retryAfterSeconds ?? rateLimit?.estimatedTimeToRegainAccess ?? 0;
+        const minDelayMs = serverMinSec > 0 ? serverMinSec * 1000 : 0;
+
+        // 4. Calculate bounded exponential backoff with full jitter
+        const calculatedDelay = defaultPolicy.jitter
+          ? calculateBackoffWithJitter(baseDelay, attempt, maxDelay, factor, minDelayMs)
+          : Math.max(minDelayMs, Math.min(baseDelay * Math.pow(factor, attempt - 1), maxDelay));
+
+        lastDelayMs = calculatedDelay;
+
+        // 5. Global execution budget check (280s safe limit with 10s persistence buffer)
+        const remainingBudget = options.remainingBudgetMs ? options.remainingBudgetMs() : Infinity;
+        const RESERVED_PERSISTENCE_BUFFER_MS = 10 * 1000;
+
+        if (remainingBudget < calculatedDelay + RESERVED_PERSISTENCE_BUFFER_MS) {
+          const budgetErr = new MetaApiError(
+            `Quỹ thời gian thực thi Serverless còn lại (${Math.round(remainingBudget / 1000)}s) không đủ cho thời gian chờ thử lại (${Math.round(calculatedDelay / 1000)}s). Dừng thử lại an toàn để lưu trữ dữ liệu.`,
+            {
+              code: error instanceof MetaApiError ? error.code : undefined,
+              category: 'NETWORK_ERROR',
+              isTransient: true,
+              userMessage: 'Quỹ thời gian thực thi Serverless sắp hết. Dừng thử lại an toàn để lưu trữ dữ liệu hiện có.',
+            }
+          );
+          if (options.onExhausted) {
+            try {
+              options.onExhausted({
+                totalAttempts: attempt,
+                totalRetryElapsedMs,
+                classification,
+                lastError: budgetErr,
+              });
+            } catch {}
+          }
+          throw budgetErr;
+        }
+
+        // 6. Per-chunk retry budget check (Prevent one failing date from consuming entire job budget)
+        if (totalRetryElapsedMs + calculatedDelay > maxRetryBudgetMs) {
+          const chunkBudgetErr = new MetaApiError(
+            `Vượt quá giới hạn thời gian thử lại tối đa cho ngày này (${Math.round(maxRetryBudgetMs / 1000)}s). Dừng thử lại.`,
+            {
+              code: error instanceof MetaApiError ? error.code : undefined,
+              category: error instanceof MetaApiError ? error.category : 'API_ERROR',
+              isTransient: true,
+              userMessage: 'Đã vượt quá giới hạn thời gian thử lại tối đa cho ngày này.',
+            }
+          );
+          if (options.onExhausted) {
+            try {
+              options.onExhausted({
+                totalAttempts: attempt,
+                totalRetryElapsedMs,
+                classification,
+                lastError: chunkBudgetErr,
+              });
+            } catch {}
+          }
+          throw chunkBudgetErr;
+        }
+
+        // 7. Invoke onRetry callback (Supports both legacy and rich context shapes)
+        const retryContext: RequestRetryContext = {
+          attempt,
+          maxAttempts,
+          classification,
+          delayMs: calculatedDelay,
+          requestDurationMs,
+          totalRetryElapsedMs: totalRetryElapsedMs + calculatedDelay,
+          remainingJobBudgetMs: remainingBudget,
+          rateLimit,
+          error,
+        };
+
         if (options.onRetry) {
           try {
-            options.onRetry(attempt, error, delay);
-          } catch {
-            // Ignore callback errors
-          }
+            if (options.onRetry.length > 1) {
+              (options.onRetry as (att: number, err: unknown, d: number, ctx: RequestRetryContext) => void)(
+                attempt,
+                error,
+                calculatedDelay,
+                retryContext
+              );
+            } else {
+              (options.onRetry as (ctx: RequestRetryContext) => void)(retryContext);
+            }
+          } catch {}
         }
-        await new Promise(resolve => setTimeout(resolve, delay));
+
+        totalRetryElapsedMs += calculatedDelay;
+        await new Promise(resolve => setTimeout(resolve, calculatedDelay));
       }
     }
-
-    throw new MetaApiError('Max retries exceeded while calling Meta API', {
-      category: 'NETWORK_ERROR',
-      userMessage: 'Gọi Meta API vượt quá số lần thử lại tối đa.',
-    });
   }
 
   /**
@@ -658,6 +1083,30 @@ export class MetaApiService {
         });
       }
       return { id: 'recovered_after_retry', success: true };
+    }
+
+    if (token === 'test-token-error-2') {
+      const key = `${endpoint}_${params.limit || ''}_error2`;
+      const attempt = MetaApiService.mockRetryCounter[key] || 0;
+      MetaApiService.mockRetryCounter[key] = attempt + 1;
+      if (attempt === 0) {
+        throw new MetaApiError('Service temporarily unavailable', {
+          code: 2,
+          isTransient: true,
+          category: 'API_ERROR',
+          userMessage: 'Dịch vụ Meta tạm thời không phản hồi. Hệ thống đang tự động thử lại.',
+        });
+      }
+      return { id: 'recovered_error_2', success: true };
+    }
+
+    if (token === 'test-token-error-2-always') {
+      throw new MetaApiError('Service temporarily unavailable', {
+        code: 2,
+        isTransient: true,
+        category: 'API_ERROR',
+        userMessage: 'Dịch vụ Meta tạm thời không phản hồi. Hệ thống đang tự động thử lại.',
+      });
     }
 
     if (token === 'test-token-pagination') {

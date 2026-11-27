@@ -5,6 +5,7 @@ import {
   MetaConnectionParam,
   normalizeAdAccountId,
   isMockToken,
+  classifyMetaError,
 } from '@/lib/meta';
 import { assertDatabaseIsolation } from './preflightGuard';
 import { Logger, LogContext, generateCorrelationId } from '@/lib/logger';
@@ -536,24 +537,79 @@ export class MetaSyncEngine {
               limit: 100,
               maxPages: options.maxPages || 100,
               retryOptions: {
-                onRetry: (attempt, err, delayMs) => {
+                remainingBudgetMs: () => FUNCTION_TIMEOUT_MS - (Date.now() - startTime),
+                maxRetryBudgetMs: 45 * 1000,
+                onRetry: (attempt, err, delayMs, retryCtx) => {
                   chunkRetryCount++;
+                  const classification = retryCtx?.classification || 'UNKNOWN';
+                  const remainingBudget = retryCtx?.remainingJobBudgetMs;
+                  const rateLimit = retryCtx?.rateLimit;
+
                   Logger.warn(
                     'META_API',
                     'MetaRequestRetry',
-                    `[${currentDate}] Thử lại lần ${attempt} khi gọi Meta API sau ${delayMs}ms: ${(err as Error).message}`,
+                    `[${currentDate}] Thử lại lần ${attempt} khi gọi Meta API sau ${delayMs}ms (phân loại: ${classification}): ${(err as Error).message}`,
                     ctx,
                     {
                       stage: 'meta_api_retry',
                       retryAttempt: attempt,
                       durationMs: delayMs,
-                      metadata: { reportingDate: currentDate },
+                      metadata: {
+                        reportingDate: currentDate,
+                        classification,
+                        remainingJobBudgetMs: remainingBudget,
+                        totalRetryElapsedMs: retryCtx?.totalRetryElapsedMs,
+                        rateLimit,
+                      },
                       metaError: err instanceof MetaApiError ? {
                         code: err.code,
                         subcode: err.subcode,
                         isTransient: err.isTransient,
                         fbtraceId: err.fbtraceId,
                         message: err.userMessage || err.message,
+                      } : undefined,
+                    }
+                  );
+                },
+                onRecovered: (recCtx) => {
+                  Logger.info(
+                    'META_API',
+                    'MetaRequestRecovered',
+                    `[${currentDate}] Meta API đã phục hồi thành công sau ${recCtx.attempt} lần thử lại (${recCtx.totalRetryElapsedMs}ms, phân loại: ${recCtx.classification})`,
+                    ctx,
+                    {
+                      stage: 'meta_api_recovery',
+                      retryAttempt: recCtx.attempt,
+                      durationMs: recCtx.lastDelayMs,
+                      metadata: {
+                        reportingDate: currentDate,
+                        totalRetryElapsedMs: recCtx.totalRetryElapsedMs,
+                        classification: recCtx.classification,
+                      },
+                    }
+                  );
+                },
+                onExhausted: (exCtx) => {
+                  const lastErr = exCtx.lastError as Error;
+                  Logger.error(
+                    'META_API',
+                    'MetaRetryExhausted',
+                    `[${currentDate}] Thử lại Meta API thất bại hoàn toàn sau ${exCtx.totalAttempts} lần (${exCtx.totalRetryElapsedMs}ms, phân loại: ${exCtx.classification}): ${lastErr?.message || 'Không rõ lỗi'}`,
+                    ctx,
+                    {
+                      stage: 'meta_api_exhausted',
+                      retryAttempt: exCtx.totalAttempts,
+                      metadata: {
+                        reportingDate: currentDate,
+                        totalRetryElapsedMs: exCtx.totalRetryElapsedMs,
+                        classification: exCtx.classification,
+                      },
+                      metaError: lastErr instanceof MetaApiError ? {
+                        code: lastErr.code,
+                        subcode: lastErr.subcode,
+                        isTransient: lastErr.isTransient,
+                        fbtraceId: lastErr.fbtraceId,
+                        message: lastErr.userMessage || lastErr.message,
                       } : undefined,
                     }
                   );
@@ -891,7 +947,11 @@ export class MetaSyncEngine {
           );
 
           // Permanent error check: Expired token or auth failure terminates remaining dates
-          const isPermanent = isMetaErr && (chunkErr.category === 'TOKEN_EXPIRED' || chunkErr.code === 190);
+          const isPermanent = isMetaErr && (
+            classifyMetaError(chunkErr) === 'PERMANENT' ||
+            chunkErr.category === 'TOKEN_EXPIRED' ||
+            chunkErr.code === 190
+          );
           if (isPermanent) {
             const remaining = requestedDates.slice(chunkIdx + 1);
             for (const unDate of remaining) {
