@@ -345,3 +345,31 @@ model SyncLog {
   @@index([severity, module])
 }
 
+model SyncCheckpoint {
+  id             String    @id @default(uuid())
+  adAccountId    String
+  syncJobId      String
+  reportingDate  String    // YYYY-MM-DD
+  status         String    @default("PENDING") // PENDING, RUNNING, SUCCESS, FAILED, UNPROCESSED
+  attemptCount   Int       @default(0)
+  completedAt    DateTime?
+  recordCount    Int       @default(0)
+  spend          Float     @default(0)
+  impressions    Int       @default(0)
+  clicks         Int       @default(0)
+  isEmptyDay     Boolean   @default(false)
+  lastError      String?
+  retryEligible  Boolean   @default(true)
+  nextEligibleAt DateTime?
+  metadataJson   String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([adAccountId, reportingDate])
+  @@index([syncJobId])
+  @@index([status])
+  @@index([adAccountId, status])
+  @@index([retryEligible, nextEligibleAt])
+}
+
+

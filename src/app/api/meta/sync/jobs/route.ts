@@ -78,9 +78,14 @@ export async function GET(request: Request) {
       },
     });
 
+    const formattedJobs = jobs.map(j => ({
+      ...j,
+      canResume: j.status === 'partial' || j.status === 'timeout',
+    }));
+
     return NextResponse.json({
       success: true,
-      jobs,
+      jobs: formattedJobs,
       summary: {
         targetAccountId,
         lastSuccessfulSync: lastSuccessJob?.finishedAt || null,

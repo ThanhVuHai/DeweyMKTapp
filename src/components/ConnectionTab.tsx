@@ -31,6 +31,7 @@ interface ConnectionTabProps {
   currentRole: string;
   triggerRefresh: number;
   onRefresh: () => void;
+  onResumeJob?: (job: { id: string; adAccountId?: string | null; dateFrom?: string | null; dateTo?: string | null }) => void;
 }
 
 interface AdAccountItem {
@@ -75,7 +76,7 @@ interface FeedbackState {
   details?: DiagnosticDetails | string | null;
 }
 
-export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }: ConnectionTabProps) {
+export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh, onResumeJob }: ConnectionTabProps) {
   const [connections, setConnections] = React.useState<MetaConnectionItem[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -219,6 +220,7 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
     startedAt?: string | null;
     finishedAt?: string | null;
     errorMessage?: string | null;
+    canResume?: boolean;
   }
   interface SyncSummaryData {
     targetAccountId: string;
@@ -1315,6 +1317,7 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
                       <th className="p-2">Trạng thái</th>
                       <th className="p-2">Thời gian &amp; Thời lượng</th>
                       <th className="p-2">Tiến độ / Ghi chú / Lỗi</th>
+                      <th className="p-2">Hành động</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-850">
@@ -1383,6 +1386,21 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh }
                               <span className="text-slate-400 font-medium">
                                 {job.errorMessage || job.status}
                               </span>
+                            )}
+                          </td>
+                          <td className="p-2">
+                            {(job.status === 'partial' || job.status === 'timeout' || Boolean(job.canResume)) && onResumeJob ? (
+                              <button
+                                type="button"
+                                onClick={() => onResumeJob(job)}
+                                className="px-2 py-0.5 bg-amber-600/30 hover:bg-amber-600/50 text-amber-300 border border-amber-500/30 rounded text-4xs font-bold transition-all flex items-center gap-1 shadow-sm"
+                                title="Tiếp tục đồng bộ các ngày còn lại từ checkpoint"
+                              >
+                                <RefreshCw className="w-2.5 h-2.5" />
+                                <span>Resume</span>
+                              </button>
+                            ) : (
+                              <span className="text-4xs text-slate-600">—</span>
                             )}
                           </td>
                         </tr>

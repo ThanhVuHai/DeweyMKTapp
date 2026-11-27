@@ -79,6 +79,7 @@ export default function DashboardPage() {
     impressions: number;
     clicks: number;
     durationMs: number;
+    fromCheckpoint?: boolean;
     error?: string;
   }
 
@@ -120,10 +121,24 @@ export default function DashboardPage() {
   const [syncModalDateFrom, setSyncModalDateFrom] = React.useState('2026-10-01');
   const [syncModalDateTo, setSyncModalDateTo] = React.useState('2026-10-31');
   const [syncForce, setSyncForce] = React.useState(false);
+  const [syncMode, setSyncMode] = React.useState<'resume' | 'full'>('resume');
+  const [syncParentJobId, setSyncParentJobId] = React.useState<string | undefined>(undefined);
   const [syncResultData, setSyncResultData] = React.useState<SyncResultData | null>(null);
   const [syncError, setSyncError] = React.useState<string | null>(null);
 
   const handleOpenSyncModal = () => {
+    setShowSyncModal(true);
+    setSyncParentJobId(undefined);
+    setSyncMode('resume');
+    setSyncError(null);
+  };
+
+  const handleResumeFromHistory = (job: { id: string; adAccountId?: string | null; dateFrom?: string | null; dateTo?: string | null }) => {
+    if (job.adAccountId) setSyncModalAccount(job.adAccountId);
+    if (job.dateFrom) setSyncModalDateFrom(job.dateFrom.split('T')[0]);
+    if (job.dateTo) setSyncModalDateTo(job.dateTo.split('T')[0]);
+    setSyncParentJobId(job.id);
+    setSyncMode('resume');
     setShowSyncModal(true);
     setSyncError(null);
   };
@@ -144,6 +159,8 @@ export default function DashboardPage() {
           dateFrom: syncModalDateFrom,
           dateTo: syncModalDateTo,
           force: syncForce,
+          mode: syncMode,
+          parentJobId: syncParentJobId,
         }),
       });
 
@@ -402,6 +419,7 @@ export default function DashboardPage() {
             currentRole="admin" 
             triggerRefresh={triggerRefresh}
             onRefresh={() => setTriggerRefresh(prev => prev + 1)}
+            onResumeJob={handleResumeFromHistory}
           />
         );
       case 'audit':
@@ -774,6 +792,47 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
+                {/* Sync Mode selector (Resume vs Full Refresh) */}
+                <div className="bg-slate-950/40 p-3 rounded-xl border border-slate-850 space-y-2">
+                  <span className="text-slate-400 text-4xs font-semibold block uppercase">
+                    Chế độ đồng bộ (Sync Mode)
+                  </span>
+                  <div className="grid grid-cols-2 gap-2 text-3xs">
+                    <button
+                      type="button"
+                      onClick={() => setSyncMode('resume')}
+                      className={`p-2 rounded-lg border text-left flex flex-col gap-0.5 transition-all ${
+                        syncMode === 'resume'
+                          ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-300'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      <span className="font-bold">Tiếp tục (Resume)</span>
+                      <span className="text-4xs text-slate-500">Bỏ qua ngày đã hoàn thành, chỉ chạy ngày còn thiếu</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSyncMode('full');
+                        setSyncParentJobId(undefined);
+                      }}
+                      className={`p-2 rounded-lg border text-left flex flex-col gap-0.5 transition-all ${
+                        syncMode === 'full'
+                          ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-300'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      <span className="font-bold">Làm mới (Full Refresh)</span>
+                      <span className="text-4xs text-slate-500">Tải lại toàn bộ các ngày từ Meta Graph API</span>
+                    </button>
+                  </div>
+                  {syncParentJobId && (
+                    <p className="text-4xs text-amber-400/90 font-mono">
+                      Tiếp tục từ Parent Job: {syncParentJobId.slice(0, 8)}
+                    </p>
+                  )}
+                </div>
+
                 {/* Force sync option */}
                 <div className="flex items-center space-x-2 px-1">
                   <input
@@ -784,7 +843,7 @@ export default function DashboardPage() {
                     className="rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-0"
                   />
                   <label htmlFor="syncForceCheck" className="text-4xs text-slate-400 cursor-pointer select-none">
-                    Ghi đè và giải phóng lock nếu có tiến trình khác bị kẹt (Force Sync)
+                    Bỏ qua bộ đệm checkpoint và ép buộc chạy lại (Force Refresh)
                   </label>
                 </div>
               </div>
@@ -798,7 +857,7 @@ export default function DashboardPage() {
                   className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center space-x-2 shadow-lg"
                 >
                   <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-                  <span>{syncing ? 'Đang thực hiện đồng bộ vào Neon...' : 'Bắt đầu Đồng bộ (Execute Sync Now)'}</span>
+                  <span>{syncing ? 'Đang thực hiện đồng bộ vào Neon...' : syncMode === 'resume' ? 'Bắt đầu Đồng bộ / Tiếp tục (Resume)' : 'Bắt đầu Làm mới (Full Refresh)'}</span>
                 </button>
               </div>
 
@@ -851,6 +910,23 @@ export default function DashboardPage() {
                     </span>
                   </div>
 
+                  {/* Quick Resume Button for PARTIAL Status */}
+                  {syncResultData.status === 'PARTIAL' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSyncParentJobId(syncResultData.jobId);
+                        setSyncMode('resume');
+                        handleExecuteSyncNow();
+                      }}
+                      disabled={syncing}
+                      className="w-full py-2 px-3 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center justify-center space-x-2 transition-all shadow-md"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+                      <span>Tiếp tục đồng bộ các ngày còn lại (Resume Remaining Dates)</span>
+                    </button>
+                  )}
+
                   {/* Daily Chunks Breakdown */}
                   {syncResultData.chunks && syncResultData.chunks.length > 0 && (
                     <div className="space-y-1.5 pt-1">
@@ -883,6 +959,11 @@ export default function DashboardPage() {
                                 }`}
                               />
                               <span className="font-mono font-bold">{chunk.date}</span>
+                              {chunk.fromCheckpoint && (
+                                <span className="px-1.5 py-0.2 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded text-5xs font-bold uppercase tracking-wider">
+                                  Checkpoint
+                                </span>
+                              )}
                             </div>
                             <div className="text-right">
                               {chunk.status === 'SUCCESS' ? (

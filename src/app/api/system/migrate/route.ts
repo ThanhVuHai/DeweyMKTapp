@@ -77,7 +77,7 @@ export async function POST(request: Request) {
     const preStoredSpend = preInsights.reduce((sum, item) => sum + (item.spend || 0), 0);
     const preAuditLogCount = await prisma.auditLog.count();
 
-    // Check if SyncLog table already exists
+    // Check if SyncLog and SyncCheckpoint tables already exist
     interface TableCheckRow {
       exists: boolean;
     }
@@ -90,15 +90,25 @@ export async function POST(request: Request) {
     `;
     const syncLogAlreadyExists = tableCheck[0]?.exists || false;
 
+    const checkpointTableCheck = await prisma.$queryRaw<TableCheckRow[]>`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'SyncCheckpoint'
+      ) as exists;
+    `;
+    const syncCheckpointAlreadyExists = checkpointTableCheck[0]?.exists || false;
+
     // 6. Disable runtime execution if already migrated
-    if (syncLogAlreadyExists && process.env.ENABLE_RUNTIME_MIGRATION !== 'true') {
+    if (syncLogAlreadyExists && syncCheckpointAlreadyExists && process.env.ENABLE_RUNTIME_MIGRATION !== 'true') {
       return NextResponse.json({
         success: true,
         alreadyApplied: true,
         runtimeExecutionDisabled: true,
-        message: 'Bảng SyncLog đã tồn tại và migration đã hoàn tất. Runtime migration execution đã được vô hiệu hóa để bảo đảm an toàn cơ sở dữ liệu.',
+        message: 'Bảng SyncLog và SyncCheckpoint đã tồn tại và migration đã hoàn tất. Runtime migration execution đã được vô hiệu hóa để bảo đảm an toàn cơ sở dữ liệu.',
         postMigration: {
           syncLogExists: true,
+          syncCheckpointExists: true,
           gisHanoiInsightsCount: preInsightsCount,
           gisHanoiStoredSpend: Math.round(preStoredSpend),
           auditLogCount: preAuditLogCount,
@@ -159,6 +169,38 @@ export async function POST(request: Request) {
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "SyncLog_adAccountId_createdAt_idx" ON "SyncLog"("adAccountId", "createdAt");`);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "SyncLog_severity_module_idx" ON "SyncLog"("severity", "module");`);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "AuditLog_createdAt_idx" ON "AuditLog"("createdAt");`);
+
+    // Additive Task 2.4: SyncCheckpoint Table & Indexes
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "SyncCheckpoint" (
+          "id" TEXT NOT NULL,
+          "adAccountId" TEXT NOT NULL,
+          "syncJobId" TEXT NOT NULL,
+          "reportingDate" TEXT NOT NULL,
+          "status" TEXT NOT NULL DEFAULT 'PENDING',
+          "attemptCount" INTEGER NOT NULL DEFAULT 0,
+          "completedAt" TIMESTAMP(3),
+          "recordCount" INTEGER NOT NULL DEFAULT 0,
+          "spend" DOUBLE PRECISION NOT NULL DEFAULT 0,
+          "impressions" INTEGER NOT NULL DEFAULT 0,
+          "clicks" INTEGER NOT NULL DEFAULT 0,
+          "isEmptyDay" BOOLEAN NOT NULL DEFAULT FALSE,
+          "lastError" TEXT,
+          "retryEligible" BOOLEAN NOT NULL DEFAULT TRUE,
+          "nextEligibleAt" TIMESTAMP(3),
+          "metadataJson" TEXT,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+          CONSTRAINT "SyncCheckpoint_pkey" PRIMARY KEY ("id")
+      );
+    `);
+
+    await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "SyncCheckpoint_account_date_key" ON "SyncCheckpoint"("adAccountId", "reportingDate");`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "SyncCheckpoint_syncJobId_idx" ON "SyncCheckpoint"("syncJobId");`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "SyncCheckpoint_status_idx" ON "SyncCheckpoint"("status");`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "SyncCheckpoint_adAccountId_status_idx" ON "SyncCheckpoint"("adAccountId", "status");`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "SyncCheckpoint_retryEligible_nextEligibleAt_idx" ON "SyncCheckpoint"("retryEligible", "nextEligibleAt");`);
 
     // 5. Post-Migration Verification
     const postTableCheck = await prisma.$queryRaw<TableCheckRow[]>`

@@ -9,6 +9,7 @@ import {
 } from '@/lib/meta';
 import { assertDatabaseIsolation } from './preflightGuard';
 import { Logger, LogContext, generateCorrelationId } from '@/lib/logger';
+import { CheckpointManager } from './checkpointManager';
 
 export interface SyncOptions {
   adAccountId: string;
@@ -17,6 +18,8 @@ export interface SyncOptions {
   jobType?: 'manual_sync' | 'scheduled_cron';
   maxPages?: number;
   force?: boolean;
+  mode?: 'resume' | 'full'; // Task 2.4: Resume unfinished dates vs Full Refresh
+  parentJobId?: string;     // Task 2.4: Traceable parent job across continuation sessions
   correlationId?: string;
   actor?: string;
 }
@@ -29,6 +32,7 @@ export interface DailyChunkResult {
   impressions: number;
   clicks: number;
   durationMs: number;
+  fromCheckpoint?: boolean; // Task 2.4: Provenance flag (preserved from persistent checkpoint)
   error?: string;
   metaErrorCode?: number;
   metaErrorSubcode?: number;
@@ -40,6 +44,7 @@ export interface DatesSummary {
   successfulCount: number;
   failedCount: number;
   unprocessedCount: number;
+  recoveredFromCheckpointCount?: number;
   successfulDates: string[];
   failedDates: Array<{
     date: string;
@@ -55,6 +60,8 @@ export interface SyncResult {
   success: boolean;
   status: 'SUCCESS' | 'PARTIAL' | 'FAILED';
   jobId: string;
+  parentJobId?: string;
+  isResume?: boolean;
   jobType: string;
   adAccountId: string;
   accountName: string;
@@ -334,7 +341,7 @@ export class MetaSyncEngine {
       orderBy: { startedAt: 'desc' },
     });
 
-    if (activeRunningJob && !options.force) {
+    if (activeRunningJob) {
       const elapsedSec = Math.round(
         (Date.now() - (activeRunningJob.startedAt?.getTime() || Date.now())) / 1000
       );
@@ -371,19 +378,53 @@ export class MetaSyncEngine {
       }
     );
 
-    // 5. Initialize SyncJob Tracking Record
-    const syncJob = await prisma.syncJob.create({
-      data: {
-        metaConnectionId: connection.id,
-        adAccountId: normalizedAccountId,
-        jobType,
-        status: 'running',
-        dateFrom: new Date(dateFrom + 'T00:00:00.000Z'),
-        dateTo: new Date(dateTo + 'T23:59:59.999Z'),
-        startedAt: new Date(),
-        errorMessage: '[Giai đoạn 1/5] Khởi tạo kết nối Meta API và xác thực AdAccount...',
-      },
-    });
+    // 5. Initialize or Resume SyncJob Tracking Record (One traceable parent job)
+    let syncJob: { id: string; status: string };
+    const isResume = options.mode !== 'full' && !options.force;
+
+    if (options.parentJobId) {
+      const existingParent = await prisma.syncJob.findUnique({
+        where: { id: options.parentJobId },
+      });
+      if (existingParent) {
+        syncJob = await prisma.syncJob.update({
+          where: { id: options.parentJobId },
+          data: {
+            status: 'running',
+            startedAt: new Date(),
+            finishedAt: null,
+            errorMessage: '[Tiếp tục đồng bộ] Đang phục hồi checkpoint và đồng bộ các ngày còn lại...',
+          },
+        });
+      } else {
+        syncJob = await prisma.syncJob.create({
+          data: {
+            id: options.parentJobId,
+            metaConnectionId: connection.id,
+            adAccountId: normalizedAccountId,
+            jobType,
+            status: 'running',
+            dateFrom: new Date(dateFrom + 'T00:00:00.000Z'),
+            dateTo: new Date(dateTo + 'T23:59:59.999Z'),
+            startedAt: new Date(),
+            errorMessage: '[Giai đoạn 1/5] Khởi tạo kết nối Meta API và xác thực AdAccount...',
+          },
+        });
+      }
+    } else {
+      syncJob = await prisma.syncJob.create({
+        data: {
+          metaConnectionId: connection.id,
+          adAccountId: normalizedAccountId,
+          jobType,
+          status: 'running',
+          dateFrom: new Date(dateFrom + 'T00:00:00.000Z'),
+          dateTo: new Date(dateTo + 'T23:59:59.999Z'),
+          startedAt: new Date(),
+          errorMessage: '[Giai đoạn 1/5] Khởi tạo kết nối Meta API và xác thực AdAccount...',
+        },
+      });
+    }
 
     ctx.syncJobId = syncJob.id;
 
@@ -430,7 +471,7 @@ export class MetaSyncEngine {
       timings['adAccountSyncMs'] = Date.now() - tAccountStart;
       console.log(`[MetaSyncEngine:Stage] AdAccount ${accountInfo.accountName} upserted in ${timings['adAccountSyncMs']}ms`);
 
-      // 7. Date Chunking: Sequential Daily Chunk Processing
+      // 7. Date Chunking & Persistent Checkpoint Recovery
       const requestedDates = splitDateRangeToDays(dateFrom, dateTo);
       const totalDates = requestedDates.length;
       const accountTimezone = accountInfo.timezoneName || dbAdAccount.timezoneName || 'Asia/Ho_Chi_Minh';
@@ -457,15 +498,67 @@ export class MetaSyncEngine {
       let grandTotalSpend = 0;
       let grandTotalImpressions = 0;
       let grandTotalClicks = 0;
+      let recoveredFromCheckpointCount = 0;
 
-      for (let chunkIdx = 0; chunkIdx < requestedDates.length; chunkIdx++) {
-        const currentDate = requestedDates[chunkIdx];
+      // Task 2.4: Checkpoint recovery — Skip dates already established as completed
+      if (isResume) {
+        const verified = await CheckpointManager.getVerifiedCheckpoints(
+          normalizedAccountId,
+          requestedDates,
+          syncJob.id,
+          ctx
+        );
+
+        for (const compDate of verified.completedDates) {
+          const cp = verified.completedMap.get(compDate)!;
+          successfulDates.push(compDate);
+          recoveredFromCheckpointCount++;
+          chunkResults.push({
+            date: compDate,
+            status: 'SUCCESS',
+            insightsCount: cp.recordCount,
+            spend: cp.spend,
+            impressions: cp.impressions,
+            clicks: cp.clicks,
+            durationMs: 0,
+            fromCheckpoint: true,
+          });
+          grandTotalSpend += cp.spend;
+          grandTotalImpressions += cp.impressions;
+          grandTotalClicks += cp.clicks;
+          grandTotalInsights += cp.recordCount;
+        }
+
+        if (verified.completedDates.length > 0) {
+          await Logger.info(
+            'SYNC_ENGINE',
+            'CheckpointsRecovered',
+            `Phục hồi thành công ${verified.completedDates.length}/${totalDates} ngày từ Checkpoint. Bỏ qua không gọi lại Meta API: ${verified.completedDates.join(', ')}`,
+            ctx,
+            {
+              stage: 'checkpoint_recovery',
+              recordCount: verified.completedDates.length,
+              metadata: {
+                totalDates,
+                recoveredDates: verified.completedDates,
+                pendingDatesCount: verified.pendingDates.length,
+              },
+            }
+          );
+        }
+      }
+
+      // Filter to dates needing active execution
+      const datesToProcess = requestedDates.filter(d => !successfulDates.includes(d));
+
+      for (let chunkIdx = 0; chunkIdx < datesToProcess.length; chunkIdx++) {
+        const currentDate = datesToProcess[chunkIdx];
         const chunkStartTime = Date.now();
         const currentElapsedMs = chunkStartTime - startTime;
 
         // A. Execution Budget Safety Check (Stop safely when remaining budget < 25s)
         if (FUNCTION_TIMEOUT_MS - currentElapsedMs < SAFETY_BUDGET_REMAINING_MS) {
-          const remaining = requestedDates.slice(chunkIdx);
+          const remaining = datesToProcess.slice(chunkIdx);
           for (const unDate of remaining) {
             unprocessedDates.push(unDate);
             chunkResults.push({
@@ -478,6 +571,11 @@ export class MetaSyncEngine {
               durationMs: 0,
               error: 'Ngừng an toàn: Quỹ thời gian Serverless còn lại không đủ để thực thi ngày này.',
             });
+            await CheckpointManager.recordChunkUnprocessed(
+              normalizedAccountId,
+              syncJob.id,
+              unDate
+            );
           }
 
           await Logger.warn(
@@ -499,32 +597,39 @@ export class MetaSyncEngine {
         await prisma.syncJob.update({
           where: { id: syncJob.id },
           data: {
-            errorMessage: `[Giai đoạn 3/5] Đang xử lý ngày ${currentDate} (${chunkIdx + 1}/${totalDates}). ` +
+            errorMessage: `[Giai đoạn 3/5] Đang xử lý ngày ${currentDate} (${successfulDates.length + 1}/${totalDates}). ` +
               `Đã xong: ${successfulDates.length} ngày, lỗi: ${failedDates.length} ngày...`,
           },
         });
+
+        // Record running checkpoint state
+        await CheckpointManager.recordChunkRunning(
+          normalizedAccountId,
+          syncJob.id,
+          currentDate
+        );
 
         // C. Log DailyChunkStarted
         await Logger.info(
           'SYNC_ENGINE',
           'DailyChunkStarted',
-          `Bắt đầu đồng bộ Daily Chunk ngày ${currentDate} (${chunkIdx + 1}/${totalDates}) cho tài khoản ${normalizedAccountId}`,
+          `Bắt đầu đồng bộ Daily Chunk ngày ${currentDate} (${successfulDates.length + 1}/${totalDates}) cho tài khoản ${normalizedAccountId}`,
           ctx,
           {
             stage: 'daily_chunk_fetch',
             actor,
             metadata: {
               reportingDate: currentDate,
-              chunkIndex: chunkIdx + 1,
+              chunkIndex: successfulDates.length + 1,
               totalDates,
               timezone: accountTimezone,
             },
           }
         );
 
+        let chunkRetryCount = 0;
         try {
           // D. Fetch Daily Insights for currentDate with pagination and retry
-          let chunkRetryCount = 0;
           const tInsightsFetchStart = Date.now();
 
           const insightsResult = await MetaApiService.getInsightsPaged(
@@ -637,6 +742,20 @@ export class MetaSyncEngine {
               clicks: 0,
               durationMs: chunkDuration,
             });
+
+            // Task 2.4: Persist zero-activity success checkpoint
+            await CheckpointManager.recordChunkSuccess(
+              normalizedAccountId,
+              syncJob.id,
+              currentDate,
+              {
+                recordCount: 0,
+                spend: 0,
+                impressions: 0,
+                clicks: 0,
+                isEmptyDay: true,
+              }
+            );
 
             await Logger.info(
               'SYNC_ENGINE',
@@ -871,6 +990,25 @@ export class MetaSyncEngine {
             durationMs: chunkDuration,
           });
 
+          // Task 2.4: Persist successful chunk checkpoint
+          await CheckpointManager.recordChunkSuccess(
+            normalizedAccountId,
+            syncJob.id,
+            currentDate,
+            {
+              recordCount: validInsights.length,
+              spend: Math.round(chunkSpend),
+              impressions: chunkImpressions,
+              clicks: chunkClicks,
+              isEmptyDay: false,
+              metadata: {
+                campaignsInChunk: chunkCampaigns.size,
+                adsInChunk: chunkAds.size,
+                retries: chunkRetryCount,
+              },
+            }
+          );
+
           // K. Log DailyChunkCompleted
           await Logger.info(
             'SYNC_ENGINE',
@@ -924,6 +1062,15 @@ export class MetaSyncEngine {
             metaFbtraceId: fbtraceId,
           });
 
+          // Task 2.4: Record failed chunk checkpoint with deferred recovery metadata
+          await CheckpointManager.recordChunkFailure(
+            normalizedAccountId,
+            syncJob.id,
+            currentDate,
+            chunkErr,
+            chunkRetryCount + 1
+          );
+
           // Log DailyChunkFailed
           await Logger.error(
             'SYNC_ENGINE',
@@ -953,7 +1100,7 @@ export class MetaSyncEngine {
             chunkErr.code === 190
           );
           if (isPermanent) {
-            const remaining = requestedDates.slice(chunkIdx + 1);
+            const remaining = datesToProcess.slice(chunkIdx + 1);
             for (const unDate of remaining) {
               unprocessedDates.push(unDate);
               chunkResults.push({
@@ -966,6 +1113,11 @@ export class MetaSyncEngine {
                 durationMs: 0,
                 error: 'Không xử lý do phát hiện lỗi vĩnh viễn (Token hết hạn/Auth error) ở ngày trước.',
               });
+              await CheckpointManager.recordChunkUnprocessed(
+                normalizedAccountId,
+                syncJob.id,
+                unDate
+              );
             }
             await Logger.warn(
               'SYNC_ENGINE',
@@ -994,7 +1146,7 @@ export class MetaSyncEngine {
 
       // 9. Determine Final Job Status (SUCCESS, PARTIAL, FAILED)
       let finalStatus: 'success' | 'partial' | 'failed' = 'failed';
-      if (failedDates.length === 0 && unprocessedDates.length === 0) {
+      if (successfulDates.length === totalDates) {
         finalStatus = 'success';
       } else if (successfulDates.length > 0) {
         finalStatus = 'partial';
@@ -1054,6 +1206,7 @@ export class MetaSyncEngine {
             totalSpend: Math.round(grandTotalSpend),
             totalImpressions: grandTotalImpressions,
             totalClicks: grandTotalClicks,
+            recoveredFromCheckpointCount,
           },
         }
       );
@@ -1069,6 +1222,8 @@ export class MetaSyncEngine {
         success: finalStatus !== 'failed',
         status: finalStatus.toUpperCase() as 'SUCCESS' | 'PARTIAL' | 'FAILED',
         jobId: syncJob.id,
+        parentJobId: options.parentJobId,
+        isResume,
         jobType,
         adAccountId: normalizedAccountId,
         accountName: accountInfo.accountName,
@@ -1078,6 +1233,7 @@ export class MetaSyncEngine {
           successfulCount: successfulDates.length,
           failedCount: failedDates.length,
           unprocessedCount: unprocessedDates.length,
+          recoveredFromCheckpointCount,
           successfulDates,
           failedDates,
           unprocessedDates,

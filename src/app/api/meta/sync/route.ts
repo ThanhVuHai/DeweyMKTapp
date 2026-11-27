@@ -38,7 +38,15 @@ export async function POST(request: Request) {
 
     // 2. Parse Request Body
     const body = await request.json().catch(() => ({}));
-    const { adAccountId, dateFrom: rawDateFrom, dateTo: rawDateTo, connectionId, force = false } = body;
+    const {
+      adAccountId,
+      dateFrom: rawDateFrom,
+      dateTo: rawDateTo,
+      connectionId,
+      force = false,
+      mode = 'resume',
+      parentJobId,
+    } = body;
 
     const targetAccountId = adAccountId ? normalizeAdAccountId(adAccountId) : 'act_1380498158917028';
 
@@ -162,13 +170,15 @@ export async function POST(request: Request) {
       );
     }
 
-    // 6. Execute Synchronization via MetaSyncEngine with Date Chunking
+    // 6. Execute Synchronization via MetaSyncEngine with Date Chunking & Persistent Checkpoints
     const syncResult = await MetaSyncEngine.syncAdAccount(connection, {
       adAccountId: targetAccountId,
       dateFrom,
       dateTo,
       jobType: 'manual_sync',
       force,
+      mode,
+      parentJobId,
       correlationId,
       actor: actorEmail,
     });
