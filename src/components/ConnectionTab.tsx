@@ -362,6 +362,98 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh, 
     }
   };
 
+  // Task 2.6: Data Health Monitor state
+  interface DateHealthRow {
+    adAccountId: string;
+    reportingDate: string;
+    syncStatus: string;
+    verificationStatus: string;
+    displayStatus: 'VERIFIED' | 'UNVERIFIED' | 'MISMATCH' | 'FAILED' | 'MISSING' | 'IN_PROGRESS' | 'STALE';
+    lastSyncAt: string | null;
+    lastVerifiedAt: string | null;
+    latestJobId: string | null;
+    insightsCount: number;
+    spend: number;
+    impressions: number;
+    clicks: number;
+    metricDifferences: {
+      spendDiff: number;
+      impressionsDiff: number;
+      clicksDiff: number;
+    } | null;
+    lastError: string | null;
+    retryEligible: boolean;
+    nextEligibleAt: string | null;
+    isEmptyDay: boolean;
+    isFuture: boolean;
+    isBeforeStart: boolean;
+  }
+  interface DataHealthData {
+    success: boolean;
+    adAccountId: string;
+    accountTimezone: string;
+    syncStartDate: string;
+    dateRange: {
+      dateFrom: string;
+      dateTo: string;
+      totalDays: number;
+    };
+    summary: {
+      totalExpected: number;
+      verified: number;
+      unverified: number;
+      mismatch: number;
+      failed: number;
+      missing: number;
+      inProgress: number;
+      stale: number;
+      totalSpend: number;
+      totalImpressions: number;
+      totalClicks: number;
+      totalInsights: number;
+    };
+    dates: DateHealthRow[];
+    checkedAt: string;
+  }
+
+  const [healthDateFrom, setHealthDateFrom] = React.useState('2026-10-01');
+  const [healthDateTo, setHealthDateTo] = React.useState('2026-10-31');
+  const [loadingHealth, setLoadingHealth] = React.useState(false);
+  const [healthData, setHealthData] = React.useState<DataHealthData | null>(null);
+  const [selectedHealthDate, setSelectedHealthDate] = React.useState<DateHealthRow | null>(null);
+  const [healthError, setHealthError] = React.useState<string | null>(null);
+
+  const fetchHealthData = React.useCallback(async () => {
+    setLoadingHealth(true);
+    setHealthError(null);
+    try {
+      const res = await fetch(
+        `/api/meta/data-health?adAccountId=act_1380498158917028&dateFrom=${healthDateFrom}&dateTo=${healthDateTo}`
+      );
+      const data = await res.json();
+      if (data.success) {
+        setHealthData(data);
+        setSelectedHealthDate((prev: DateHealthRow | null) => {
+          if (prev) {
+            const updated = data.dates.find((d: DateHealthRow) => d.reportingDate === prev.reportingDate);
+            return updated || (data.dates.length > 0 ? data.dates[0] : null);
+          }
+          return data.dates.length > 0 ? data.dates[0] : null;
+        });
+      } else {
+        setHealthError(data.error || 'Không thể tải báo cáo sức khỏe dữ liệu');
+      }
+    } catch (err: unknown) {
+      setHealthError(err instanceof Error ? err.message : 'Lỗi kết nối khi tải sức khỏe dữ liệu');
+    } finally {
+      setLoadingHealth(false);
+    }
+  }, [healthDateFrom, healthDateTo]);
+
+  React.useEffect(() => {
+    fetchHealthData();
+  }, [fetchHealthData]);
+
   React.useEffect(() => {
     async function fetchConnections() {
       setLoading(true);
@@ -1795,6 +1887,323 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh, 
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Task 2.6: Data Health Monitor Section */}
+      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-6 shadow-xl">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-5">
+          <div>
+            <h3 className="text-sm font-extrabold text-slate-100 flex items-center gap-2">
+              <Activity className="w-4 h-4 text-emerald-400" />
+              <span>Giám sát Sức khỏe Dữ liệu (Data Health Monitor — Task 2.6)</span>
+            </h3>
+            <p className="text-2xs text-slate-400 mt-1">
+              Theo dõi tập trung tình trạng đồng bộ và đối soát từng ngày: Đã xác minh, Chưa xác minh, Khuyết thiếu, Lỗi hoặc Cũ cần làm mới.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {healthData && (
+              <span className="text-3xs font-mono text-slate-400">
+                Cập nhật: {healthData.checkedAt.replace('T', ' ').slice(0, 19)}
+              </span>
+            )}
+            <button
+              type="button"
+              disabled={loadingHealth}
+              onClick={() => fetchHealthData()}
+              className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold transition-all border border-slate-700 flex items-center gap-1.5"
+              title="Tải lại sức khỏe dữ liệu"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingHealth ? 'animate-spin text-indigo-400' : ''}`} />
+              <span className="text-3xs">Làm mới</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Controls */}
+        <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+          <div className="sm:col-span-4">
+            <label className="text-3xs text-slate-400 font-semibold block mb-1 uppercase">
+              Tài khoản Quảng cáo
+            </label>
+            <select
+              value="act_1380498158917028"
+              disabled
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200"
+            >
+              <option value="act_1380498158917028">GIS Hà Nội (act_1380498158917028)</option>
+            </select>
+          </div>
+
+          <div className="sm:col-span-3">
+            <label className="text-3xs text-slate-400 font-semibold block mb-1 uppercase">
+              Từ ngày
+            </label>
+            <input
+              type="date"
+              value={healthDateFrom}
+              onChange={e => setHealthDateFrom(e.target.value)}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
+            />
+          </div>
+
+          <div className="sm:col-span-3">
+            <label className="text-3xs text-slate-400 font-semibold block mb-1 uppercase">
+              Đến ngày
+            </label>
+            <input
+              type="date"
+              value={healthDateTo}
+              onChange={e => setHealthDateTo(e.target.value)}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
+            />
+          </div>
+
+          <div className="sm:col-span-2 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setHealthDateFrom('2026-10-01');
+                setHealthDateTo('2026-10-31');
+              }}
+              className="w-full px-2.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-3xs font-semibold transition-all border border-slate-700"
+            >
+              Tháng 10 (31 ngày)
+            </button>
+          </div>
+        </div>
+
+        {healthError && (
+          <div className="p-3 bg-rose-950/30 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+            <span>{healthError}</span>
+          </div>
+        )}
+
+        {healthData && (
+          <div className="space-y-6">
+            {/* KPI Summary Cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5 text-center">
+              <div className="p-2.5 bg-slate-950/60 border border-slate-800 rounded-xl">
+                <span className="text-4xs text-slate-400 uppercase font-bold block mb-1">Tổng Ngày</span>
+                <span className="text-sm font-extrabold text-slate-100 font-mono">{healthData.summary.totalExpected}</span>
+              </div>
+              <div className="p-2.5 bg-emerald-950/20 border border-emerald-500/30 rounded-xl">
+                <span className="text-4xs text-emerald-400 uppercase font-bold block mb-1">Đã Xác Minh</span>
+                <span className="text-sm font-extrabold text-emerald-300 font-mono">{healthData.summary.verified}</span>
+              </div>
+              <div className="p-2.5 bg-slate-950/60 border border-slate-800 rounded-xl">
+                <span className="text-4xs text-slate-400 uppercase font-bold block mb-1">Chưa Đối Soát</span>
+                <span className="text-sm font-extrabold text-slate-300 font-mono">{healthData.summary.unverified}</span>
+              </div>
+              <div className="p-2.5 bg-rose-950/20 border border-rose-500/30 rounded-xl">
+                <span className="text-4xs text-rose-400 uppercase font-bold block mb-1">Lệch Số Liệu</span>
+                <span className="text-sm font-extrabold text-rose-300 font-mono">{healthData.summary.mismatch}</span>
+              </div>
+              <div className="p-2.5 bg-amber-950/20 border border-amber-500/30 rounded-xl">
+                <span className="text-4xs text-amber-400 uppercase font-bold block mb-1">Khuyết Thiếu</span>
+                <span className="text-sm font-extrabold text-amber-300 font-mono">{healthData.summary.missing}</span>
+              </div>
+              <div className="p-2.5 bg-rose-950/20 border border-rose-500/30 rounded-xl">
+                <span className="text-4xs text-rose-400 uppercase font-bold block mb-1">Đồng Bộ Lỗi</span>
+                <span className="text-sm font-extrabold text-rose-300 font-mono">{healthData.summary.failed}</span>
+              </div>
+              <div className="p-2.5 bg-orange-950/20 border border-orange-500/30 rounded-xl">
+                <span className="text-4xs text-orange-400 uppercase font-bold block mb-1">Cũ Cần Refresh</span>
+                <span className="text-sm font-extrabold text-orange-300 font-mono">{healthData.summary.stale}</span>
+              </div>
+            </div>
+
+            {/* Date-Level Matrix & Detail Layout */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+              {/* Left: Date Matrix / Calendar Grid (7 cols) */}
+              <div className="lg:col-span-8 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider">
+                    Ma Trận Sức Khỏe Dữ Liệu Theo Ngày ({healthData.dates.length} ngày)
+                  </span>
+                  <span className="text-4xs text-slate-500">
+                    Bấm vào từng ngày để xem chi tiết
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-4 sm:grid-cols-7 gap-2">
+                  {healthData.dates.map(d => {
+                    const isSelected = selectedHealthDate?.reportingDate === d.reportingDate;
+                    const dayNum = d.reportingDate.slice(-2);
+                    const statusColors = {
+                      VERIFIED: 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300 hover:border-emerald-400',
+                      UNVERIFIED: 'bg-slate-950/60 border-slate-700/60 text-slate-300 hover:border-slate-500',
+                      MISMATCH: 'bg-rose-950/30 border-rose-500/50 text-rose-300 hover:border-rose-400',
+                      FAILED: 'bg-rose-950/40 border-rose-600/60 text-rose-300 hover:border-rose-400',
+                      MISSING: 'bg-amber-950/30 border-amber-500/50 text-amber-300 hover:border-amber-400',
+                      IN_PROGRESS: 'bg-purple-950/30 border-purple-500/50 text-purple-300 animate-pulse',
+                      STALE: 'bg-orange-950/30 border-orange-500/50 text-orange-300 hover:border-orange-400',
+                    }[d.displayStatus] || 'bg-slate-950 border-slate-800 text-slate-400';
+
+                    return (
+                      <button
+                        key={d.reportingDate}
+                        type="button"
+                        onClick={() => setSelectedHealthDate(d)}
+                        className={`p-2 rounded-xl border text-left transition-all relative flex flex-col justify-between h-16 ${statusColors} ${
+                          isSelected ? 'ring-2 ring-indigo-500 shadow-lg' : ''
+                        }`}
+                      >
+                        <div className="flex items-center justify-between w-full">
+                          <span className="text-xs font-black font-mono">{dayNum}</span>
+                          <span className="text-5xs font-bold uppercase tracking-tight">
+                            {d.displayStatus === 'VERIFIED' ? '✓' : d.displayStatus === 'MISMATCH' ? '≠' : d.displayStatus === 'MISSING' ? '✕' : ''}
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-4xs font-mono block truncate opacity-90">
+                            {d.spend > 0 ? `${(d.spend / 1000000).toFixed(1)}M` : d.isEmptyDay ? '0đ' : '—'}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Status Legend */}
+                <div className="flex flex-wrap items-center gap-3 pt-2 text-4xs text-slate-400">
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded bg-emerald-500/40 border border-emerald-500" />
+                    <span>Đã Xác Minh (VERIFIED)</span>
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded bg-slate-700 border border-slate-600" />
+                    <span>Chưa Đối Soát (UNVERIFIED)</span>
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded bg-rose-500/40 border border-rose-500" />
+                    <span>Lệch Số Liệu (MISMATCH)</span>
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded bg-amber-500/40 border border-amber-500" />
+                    <span>Khuyết Thiếu (MISSING)</span>
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded bg-orange-500/40 border border-orange-500" />
+                    <span>Cũ Cần Refresh (STALE)</span>
+                  </span>
+                </div>
+              </div>
+
+              {/* Right: Selected Date Detail Card (5 cols) */}
+              <div className="lg:col-span-4 bg-slate-950/70 border border-slate-800 rounded-2xl p-4.5 space-y-4">
+                {selectedHealthDate ? (
+                  <>
+                    <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
+                      <div>
+                        <span className="text-4xs text-slate-500 uppercase font-semibold block">Ngày báo cáo</span>
+                        <h4 className="text-sm font-black font-mono text-slate-100">{selectedHealthDate.reportingDate}</h4>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-3xs font-extrabold uppercase ${
+                          selectedHealthDate.displayStatus === 'VERIFIED'
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                            : selectedHealthDate.displayStatus === 'MISMATCH'
+                            ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                            : selectedHealthDate.displayStatus === 'MISSING'
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            : selectedHealthDate.displayStatus === 'STALE'
+                            ? 'bg-orange-500/20 text-orange-300 border border-orange-500/30'
+                            : 'bg-slate-800 text-slate-300 border border-slate-700'
+                        }`}
+                      >
+                        {selectedHealthDate.displayStatus}
+                      </span>
+                    </div>
+
+                    {/* Status Info */}
+                    <div className="space-y-2 text-3xs">
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Trạng thái đồng bộ:</span>
+                        <span className="font-mono text-slate-200 font-bold">{selectedHealthDate.syncStatus}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Trạng thái đối soát:</span>
+                        <span className="font-mono text-slate-200 font-bold">{selectedHealthDate.verificationStatus}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Parent Job ID:</span>
+                        <span className="font-mono text-slate-300">{selectedHealthDate.latestJobId || '—'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Đồng bộ lúc:</span>
+                        <span className="font-mono text-slate-400">
+                          {selectedHealthDate.lastSyncAt ? selectedHealthDate.lastSyncAt.slice(0, 19).replace('T', ' ') : 'Chưa có'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Đối soát lúc:</span>
+                        <span className="font-mono text-slate-400">
+                          {selectedHealthDate.lastVerifiedAt ? selectedHealthDate.lastVerifiedAt.slice(0, 19).replace('T', ' ') : 'Chưa đối soát'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Metric Values */}
+                    <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                      <span className="text-4xs text-slate-500 uppercase font-semibold block">Số liệu lưu trong Neon</span>
+                      <div className="grid grid-cols-2 gap-2 text-3xs font-mono">
+                        <div className="p-2 bg-slate-900 border border-slate-800 rounded-lg">
+                          <span className="text-4xs text-slate-500 block">Chi tiêu</span>
+                          <span className="font-bold text-slate-100">{formatVNDFull(selectedHealthDate.spend)}</span>
+                        </div>
+                        <div className="p-2 bg-slate-900 border border-slate-800 rounded-lg">
+                          <span className="text-4xs text-slate-500 block">Hiển thị</span>
+                          <span className="font-bold text-slate-100">{selectedHealthDate.impressions.toLocaleString()}</span>
+                        </div>
+                        <div className="p-2 bg-slate-900 border border-slate-800 rounded-lg">
+                          <span className="text-4xs text-slate-500 block">Clicks</span>
+                          <span className="font-bold text-slate-100">{selectedHealthDate.clicks.toLocaleString()}</span>
+                        </div>
+                        <div className="p-2 bg-slate-900 border border-slate-800 rounded-lg">
+                          <span className="text-4xs text-slate-500 block">Bản ghi Ad</span>
+                          <span className="font-bold text-slate-100">{selectedHealthDate.insightsCount}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Differences if Mismatch */}
+                    {selectedHealthDate.metricDifferences && (
+                      <div className="p-3 bg-rose-950/20 border border-rose-500/30 rounded-xl space-y-1 text-3xs">
+                        <span className="text-4xs font-bold uppercase text-rose-400 block">Chênh lệch với Meta API</span>
+                        <div className="flex justify-between font-mono">
+                          <span className="text-slate-400">Lệch Chi tiêu:</span>
+                          <span className="font-bold text-rose-300">{selectedHealthDate.metricDifferences.spendDiff.toLocaleString()} VND</span>
+                        </div>
+                        <div className="flex justify-between font-mono">
+                          <span className="text-slate-400">Lệch Hiển thị:</span>
+                          <span className="font-bold text-rose-300">{selectedHealthDate.metricDifferences.impressionsDiff.toLocaleString()}</span>
+                        </div>
+                        <div className="flex justify-between font-mono">
+                          <span className="text-slate-400">Lệch Clicks:</span>
+                          <span className="font-bold text-rose-300">{selectedHealthDate.metricDifferences.clicksDiff.toLocaleString()}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Error info if Failed */}
+                    {selectedHealthDate.lastError && (
+                      <div className="p-3 bg-rose-950/30 border border-rose-500/30 rounded-xl space-y-1 text-3xs text-rose-300">
+                        <span className="font-bold block text-4xs uppercase text-rose-400">Thông điệp lỗi gần nhất</span>
+                        <p className="font-mono text-4xs leading-relaxed">{selectedHealthDate.lastError}</p>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="p-8 text-center text-slate-500 text-xs">
+                    Chọn một ngày trên ma trận để xem chi tiết
+                  </div>
+                )}
               </div>
             </div>
           </div>

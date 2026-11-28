@@ -182,6 +182,7 @@ export class ReconciliationEngine {
         where: {
           adAccount: { accountId: normalizedAccountId },
           date: { gte: dateStartObj, lte: dateEndObj },
+          level: 'ad',
         },
         select: {
           id: true,
@@ -410,6 +411,38 @@ export class ReconciliationEngine {
         durationMs,
         correlationId,
       };
+
+      // 8b. Persist reconciliation evidence into SyncCheckpoint.metadataJson (Zero schema changes)
+      const verifiedAtIso = result.verifiedAt;
+      for (const item of dailyBreakdown) {
+        try {
+          const cp = checkpoints.completedMap.get(item.date);
+          const existingMeta = (cp?.metadata && typeof cp.metadata === 'object') ? (cp.metadata as Record<string, unknown>) : {};
+          const updatedMeta = {
+            ...existingMeta,
+            reconciliation: {
+              status: item.status,
+              verifiedAt: verifiedAtIso,
+              spendDiff: item.spend.difference,
+              impressionsDiff: item.impressions.difference,
+              clicksDiff: item.clicks.difference,
+              metaSpend: item.spend.meta,
+              neonSpend: item.spend.neon,
+            },
+          };
+          await prisma.syncCheckpoint.updateMany({
+            where: {
+              adAccountId: normalizedAccountId,
+              reportingDate: item.date,
+            },
+            data: {
+              metadataJson: JSON.stringify(updatedMeta),
+            },
+          });
+        } catch {
+          // Non-blocking in case of mock/read-only test environment
+        }
+      }
 
       // 9. Structured Logging of Results
       if (overallStatus === 'MATCH') {
