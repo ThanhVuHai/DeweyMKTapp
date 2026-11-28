@@ -280,6 +280,88 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh, 
     }
   };
 
+  // Task 2.5: Data Reconciliation state
+  interface MetricComparisonItem {
+    meta: number;
+    neon: number;
+    difference: number;
+    differencePct: number;
+    match: boolean;
+  }
+  interface DateReconciliationRow {
+    date: string;
+    status: 'MATCH' | 'MISMATCH' | 'INCOMPLETE' | 'EMPTY_DAY';
+    spend: MetricComparisonItem;
+    impressions: MetricComparisonItem;
+    clicks: MetricComparisonItem;
+    neonInsightsCount: number;
+    isEmptyDay: boolean;
+    notes?: string;
+  }
+  interface ReconciliationData {
+    success: boolean;
+    overallStatus: 'MATCH' | 'MISMATCH' | 'INCOMPLETE' | 'ERROR';
+    adAccountId: string;
+    dateRange: {
+      dateFrom: string;
+      dateTo: string;
+      totalDays: number;
+    };
+    totals: {
+      spend: MetricComparisonItem;
+      impressions: MetricComparisonItem;
+      clicks: MetricComparisonItem;
+      neonInsightsCount: number;
+    };
+    dailyBreakdown: DateReconciliationRow[];
+    integrity: {
+      hasDuplicates: boolean;
+      duplicateCount: number;
+      missingDates: string[];
+      unexpectedDates: string[];
+      notes: string[];
+    };
+    verifiedAt: string;
+    durationMs: number;
+    error?: string;
+  }
+
+  const [reconcileAccountId, setReconcileAccountId] = React.useState('act_1380498158917028');
+  const [reconcileDateFrom, setReconcileDateFrom] = React.useState('2026-10-01');
+  const [reconcileDateTo, setReconcileDateTo] = React.useState('2026-10-31');
+  const [reconciling, setReconciling] = React.useState(false);
+  const [reconcileResult, setReconcileResult] = React.useState<ReconciliationData | null>(null);
+  const [reconcileError, setReconcileError] = React.useState<string | null>(null);
+
+  const handleRunReconciliation = async () => {
+    setReconciling(true);
+    setReconcileError(null);
+    try {
+      const res = await fetch('/api/meta/reconcile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adAccountId: reconcileAccountId,
+          dateFrom: reconcileDateFrom,
+          dateTo: reconcileDateTo,
+        }),
+      });
+      const data = await res.json();
+      if (!data.success && data.error) {
+        setReconcileError(data.error);
+        if (data.overallStatus) {
+          setReconcileResult(data);
+        }
+      } else {
+        setReconcileResult(data);
+      }
+    } catch (err: unknown) {
+      setReconcileError(err instanceof Error ? err.message : 'Lỗi kết nối khi thực hiện đối soát');
+    } finally {
+      setReconciling(false);
+    }
+  };
+
   React.useEffect(() => {
     async function fetchConnections() {
       setLoading(true);
@@ -1412,6 +1494,311 @@ export default function ConnectionTab({ currentRole, triggerRefresh, onRefresh, 
             )}
           </div>
         </div>
+      </div>
+
+      {/* Task 2.5: Data Reconciliation Section */}
+      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-6 shadow-xl">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-5">
+          <div>
+            <h3 className="text-sm font-extrabold text-slate-100 flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              <span>Đối soát Dữ liệu Độc lập (Data Reconciliation — Task 2.5)</span>
+            </h3>
+            <p className="text-2xs text-slate-400 mt-1">
+              So sánh đối chiếu trực tiếp giữa chỉ số cấp Account từ Meta Marketing API và dữ liệu Ad-level tổng hợp lưu trong Neon PostgreSQL.
+            </p>
+          </div>
+          {reconcileResult && (
+            <div className="flex items-center gap-2">
+              <span className="text-3xs text-slate-400">Kiểm tra lúc:</span>
+              <span className="text-3xs font-mono font-medium text-slate-300">
+                {reconcileResult.verifiedAt.replace('T', ' ').slice(0, 19)} ({reconcileResult.durationMs}ms)
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Controls */}
+        <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+          <div className="sm:col-span-4">
+            <label className="text-3xs text-slate-400 font-semibold block mb-1 uppercase">
+              Tài khoản Quảng cáo
+            </label>
+            <select
+              value={reconcileAccountId}
+              onChange={e => setReconcileAccountId(e.target.value)}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+            >
+              <option value="act_1380498158917028">GIS Hà Nội (act_1380498158917028)</option>
+            </select>
+          </div>
+
+          <div className="sm:col-span-2">
+            <label className="text-3xs text-slate-400 font-semibold block mb-1 uppercase">
+              Từ ngày
+            </label>
+            <input
+              type="date"
+              value={reconcileDateFrom}
+              onChange={e => setReconcileDateFrom(e.target.value)}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
+            />
+          </div>
+
+          <div className="sm:col-span-2">
+            <label className="text-3xs text-slate-400 font-semibold block mb-1 uppercase">
+              Đến ngày
+            </label>
+            <input
+              type="date"
+              value={reconcileDateTo}
+              onChange={e => setReconcileDateTo(e.target.value)}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
+            />
+          </div>
+
+          <div className="sm:col-span-4 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setReconcileDateFrom('2026-10-01');
+                setReconcileDateTo('2026-10-31');
+              }}
+              className="px-2.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-3xs font-semibold transition-all border border-slate-700"
+            >
+              Tháng 10 (31 ngày)
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setReconcileDateFrom('2026-10-01');
+                setReconcileDateTo('2026-10-07');
+              }}
+              className="px-2.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-3xs font-semibold transition-all border border-slate-700"
+            >
+              7 ngày đầu
+            </button>
+            <button
+              type="button"
+              disabled={reconciling}
+              onClick={handleRunReconciliation}
+              className="flex-1 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center justify-center gap-2"
+            >
+              {reconciling ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Đang đối soát...</span>
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Chạy Đối soát</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Error message */}
+        {reconcileError && (
+          <div className="p-3.5 bg-rose-950/30 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-center gap-2.5">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+            <span>{reconcileError}</span>
+          </div>
+        )}
+
+        {/* Reconciliation Results */}
+        {reconcileResult && (
+          <div className="space-y-4 pt-2">
+            {/* Status Banner */}
+            <div
+              className={`p-4 rounded-2xl border flex items-center justify-between ${
+                reconcileResult.overallStatus === 'MATCH'
+                  ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
+                  : reconcileResult.overallStatus === 'MISMATCH'
+                  ? 'bg-rose-950/30 border-rose-500/40 text-rose-300'
+                  : reconcileResult.overallStatus === 'INCOMPLETE'
+                  ? 'bg-amber-950/30 border-amber-500/40 text-amber-300'
+                  : 'bg-rose-950/30 border-rose-500/40 text-rose-300'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                {reconcileResult.overallStatus === 'MATCH' ? (
+                  <CheckCircle2 className="w-6 h-6 text-emerald-400 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-6 h-6 text-amber-400 shrink-0" />
+                )}
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-black tracking-wide uppercase px-2 py-0.5 rounded-full bg-slate-900 border">
+                      {reconcileResult.overallStatus}
+                    </span>
+                    <span className="text-xs font-bold">
+                      {reconcileResult.overallStatus === 'MATCH'
+                        ? `Toàn bộ ${reconcileResult.dateRange.totalDays} ngày báo cáo và 3 chỉ số cốt lõi khớp 100% với Meta API.`
+                        : reconcileResult.overallStatus === 'MISMATCH'
+                        ? 'Phát hiện chênh lệch chỉ số giữa dữ liệu Meta API và Neon PostgreSQL.'
+                        : reconcileResult.overallStatus === 'INCOMPLETE'
+                        ? `Có ${reconcileResult.integrity.missingDates.length} ngày chưa có dữ liệu đồng bộ hoàn tất.`
+                        : 'Lỗi khi thực hiện truy vấn đối soát dữ liệu.'}
+                    </span>
+                  </div>
+                  <p className="text-3xs text-slate-400 mt-1">
+                    Khoảng thời gian: {reconcileResult.dateRange.dateFrom} đến {reconcileResult.dateRange.dateTo} ({reconcileResult.dateRange.totalDays} ngày) • {reconcileResult.totals.neonInsightsCount} bản ghi InsightsDaily
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Metric Comparison Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* Spend */}
+              <div className={`p-4 rounded-2xl border ${reconcileResult.totals.spend.match ? 'bg-slate-950/60 border-slate-800' : 'bg-rose-950/20 border-rose-500/40'}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-3xs font-bold uppercase text-slate-400">Chi tiêu (Spend)</span>
+                  <span className={`text-4xs font-bold px-1.5 py-0.5 rounded ${reconcileResult.totals.spend.match ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                    {reconcileResult.totals.spend.match ? 'KHỚP' : `${reconcileResult.totals.spend.differencePct}%`}
+                  </span>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex justify-between text-2xs">
+                    <span className="text-slate-500">Meta API:</span>
+                    <span className="font-mono text-slate-200">{formatVNDFull(reconcileResult.totals.spend.meta)}</span>
+                  </div>
+                  <div className="flex justify-between text-2xs">
+                    <span className="text-slate-500">Neon DB:</span>
+                    <span className="font-mono text-slate-200">{formatVNDFull(reconcileResult.totals.spend.neon)}</span>
+                  </div>
+                  <div className="flex justify-between text-2xs pt-1 border-t border-slate-800">
+                    <span className="text-slate-400 font-medium">Chênh lệch:</span>
+                    <span className={`font-mono font-bold ${reconcileResult.totals.spend.difference === 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {reconcileResult.totals.spend.difference === 0 ? '0 VND' : `${reconcileResult.totals.spend.difference.toLocaleString()} VND`}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Impressions */}
+              <div className={`p-4 rounded-2xl border ${reconcileResult.totals.impressions.match ? 'bg-slate-950/60 border-slate-800' : 'bg-rose-950/20 border-rose-500/40'}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-3xs font-bold uppercase text-slate-400">Hiển thị (Impressions)</span>
+                  <span className={`text-4xs font-bold px-1.5 py-0.5 rounded ${reconcileResult.totals.impressions.match ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                    {reconcileResult.totals.impressions.match ? 'KHỚP' : `${reconcileResult.totals.impressions.differencePct}%`}
+                  </span>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex justify-between text-2xs">
+                    <span className="text-slate-500">Meta API:</span>
+                    <span className="font-mono text-slate-200">{reconcileResult.totals.impressions.meta.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between text-2xs">
+                    <span className="text-slate-500">Neon DB:</span>
+                    <span className="font-mono text-slate-200">{reconcileResult.totals.impressions.neon.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between text-2xs pt-1 border-t border-slate-800">
+                    <span className="text-slate-400 font-medium">Chênh lệch:</span>
+                    <span className={`font-mono font-bold ${reconcileResult.totals.impressions.difference === 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {reconcileResult.totals.impressions.difference.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Clicks */}
+              <div className={`p-4 rounded-2xl border ${reconcileResult.totals.clicks.match ? 'bg-slate-950/60 border-slate-800' : 'bg-rose-950/20 border-rose-500/40'}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-3xs font-bold uppercase text-slate-400">Nhấp chuột (Clicks)</span>
+                  <span className={`text-4xs font-bold px-1.5 py-0.5 rounded ${reconcileResult.totals.clicks.match ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                    {reconcileResult.totals.clicks.match ? 'KHỚP' : `${reconcileResult.totals.clicks.differencePct}%`}
+                  </span>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex justify-between text-2xs">
+                    <span className="text-slate-500">Meta API:</span>
+                    <span className="font-mono text-slate-200">{reconcileResult.totals.clicks.meta.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between text-2xs">
+                    <span className="text-slate-500">Neon DB:</span>
+                    <span className="font-mono text-slate-200">{reconcileResult.totals.clicks.neon.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between text-2xs pt-1 border-t border-slate-800">
+                    <span className="text-slate-400 font-medium">Chênh lệch:</span>
+                    <span className={`font-mono font-bold ${reconcileResult.totals.clicks.difference === 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {reconcileResult.totals.clicks.difference.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Daily Discrepancy Breakdown Table */}
+            <div className="border border-slate-800 rounded-2xl overflow-hidden bg-slate-950/40">
+              <div className="p-3 border-b border-slate-800/80 bg-slate-900/40 flex items-center justify-between">
+                <span className="text-3xs font-bold text-slate-300 uppercase tracking-wider">
+                  Chi tiết Đối soát Từng Ngày ({reconcileResult.dailyBreakdown.length} ngày)
+                </span>
+                <span className="text-4xs text-slate-400">
+                  {reconcileResult.dailyBreakdown.filter(d => d.status === 'MATCH' || d.status === 'EMPTY_DAY').length}/{reconcileResult.dailyBreakdown.length} ngày khớp
+                </span>
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                <table className="w-full text-left border-collapse text-3xs">
+                  <thead>
+                    <tr className="bg-slate-900/80 text-slate-400 border-b border-slate-800 font-semibold sticky top-0">
+                      <th className="p-2">Ngày</th>
+                      <th className="p-2">Trạng thái</th>
+                      <th className="p-2">Chi tiêu (Meta / Neon)</th>
+                      <th className="p-2">Hiển thị (Meta / Neon)</th>
+                      <th className="p-2">Clicks (Meta / Neon)</th>
+                      <th className="p-2">Insights</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/40 font-mono">
+                    {reconcileResult.dailyBreakdown.map(item => (
+                      <tr key={item.date} className={item.status === 'MISMATCH' ? 'bg-rose-950/20' : 'hover:bg-slate-800/20'}>
+                        <td className="p-2 font-medium text-slate-200">{item.date}</td>
+                        <td className="p-2">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-4xs font-bold ${
+                              item.status === 'MATCH'
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : item.status === 'EMPTY_DAY'
+                                ? 'bg-blue-500/20 text-blue-300'
+                                : item.status === 'INCOMPLETE'
+                                ? 'bg-amber-500/20 text-amber-300'
+                                : 'bg-rose-500/20 text-rose-300'
+                            }`}
+                          >
+                            {item.status}
+                          </span>
+                        </td>
+                        <td className="p-2 text-slate-300">
+                          {item.spend.meta.toLocaleString()} / {item.spend.neon.toLocaleString()}
+                          {item.spend.difference !== 0 && (
+                            <span className="text-rose-400 ml-1">({item.spend.difference > 0 ? `+${item.spend.difference}` : item.spend.difference})</span>
+                          )}
+                        </td>
+                        <td className="p-2 text-slate-300">
+                          {item.impressions.meta.toLocaleString()} / {item.impressions.neon.toLocaleString()}
+                          {item.impressions.difference !== 0 && (
+                            <span className="text-rose-400 ml-1">({item.impressions.difference > 0 ? `+${item.impressions.difference}` : item.impressions.difference})</span>
+                          )}
+                        </td>
+                        <td className="p-2 text-slate-300">
+                          {item.clicks.meta.toLocaleString()} / {item.clicks.neon.toLocaleString()}
+                          {item.clicks.difference !== 0 && (
+                            <span className="text-rose-400 ml-1">({item.clicks.difference > 0 ? `+${item.clicks.difference}` : item.clicks.difference})</span>
+                          )}
+                        </td>
+                        <td className="p-2 text-slate-400">{item.neonInsightsCount}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Modal Cập nhật Token (Update Access Token) */}
